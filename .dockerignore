@@ -1,0 +1,58 @@
+# 빌드 컨텍스트에서 제외 — 이미지 크기 축소 + 빌드 캐시 안정화
+# (호스트 산출물이 이미지로 새어들지 않도록 차단)
+
+# 버전관리
+.git/
+.gitignore
+
+# 파이썬 캐시/빌드 산출물
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# 가상환경 (컨테이너 안에서 새로 설치하므로 절대 복사 금지)
+.venv/
+venv/
+env/
+ENV/
+
+# 테스트/린트 캐시 및 테스트 코드(런타임 이미지에 불필요)
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+tests/
+
+# 환경설정 — 시크릿(.env)은 이미지에 굽지 않고 런타임 주입(compose env_file)
+.env
+.env.local
+*.local
+.env.example
+
+# 런타임 산출물 (학습 맵/스크린샷 등) — 볼륨으로 마운트
+data/
+*.map.json
+navmap_store/
+
+# 컨테이너 산출물 자체
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# 문서/개발 편의 파일(런타임 불필요) — README 는 editable 설치가 참조하므로 유지
+docs/
+Makefile
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

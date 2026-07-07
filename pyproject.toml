@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remotectl"
+version = "0.1.0"
+description = "STB 리모컨 학습 에이전트 — 버튼 입력→화면 전이를 학습하고 네비게이션 맵을 구축해 목표기반으로 계획·실행한다"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "Kaon DQA" }]
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2",
+    "networkx",
+    "httpx",
+    "jinja2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "httpx",
+]
+
+[project.scripts]
+# CLI 진입점: 명세상 main 은 api/app.py 에 있다(remotectl.cli 모듈은 존재하지 않음).
+remotectl = "remotectl.api.app:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+remotectl = ["web/static/*", "api/static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]

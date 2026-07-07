@@ -1,0 +1,59 @@
+# remotectl — 로컬/사내망(Mac mini M4 Pro) 실행용 compose.
+#   docker compose up --build   → http://localhost:8099 (REST + 대시보드)
+#
+# 기본은 Mock 드라이버/센스로 실 STB 없이 학습→맵→목표실행 전 파이프라인이 완결된다.
+# 실 remote-MCP / detection-MCP 연동 시 아래 env 의 backend 를 mcp/detection 으로 바꾸고
+# *_MCP_URL 을 사내망 주소로 채운다(엔드포인트 미확정 — [WIRE-*] 배선 후 사용).
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: remotectl:latest
+    container_name: remotectl
+    ports:
+      - "8099:8099"
+    environment:
+      # ── 구현체 선택 (config.Settings) ──────────────────────────────
+      # driver_backend: mock | mcp   /   sense_backend: mock | detection
+      REMOTECTL_DRIVER_BACKEND: ${REMOTECTL_DRIVER_BACKEND:-mock}
+      REMOTECTL_SENSE_BACKEND: ${REMOTECTL_SENSE_BACKEND:-mock}
+      REMOTECTL_MAP_STORE_PATH: /app/data/navmap.json
+      REMOTECTL_SETTLE_MS: ${REMOTECTL_SETTLE_MS:-400}
+
+      # ── remote-MCP (리모컨 제어) — 사내망 HTTP, 엔드포인트 미확정 ──
+      # backend 를 mcp 로 바꿀 때만 유효. POST /press, GET /capture, POST /reset 가정.
+      REMOTE_MCP_URL: ${REMOTE_MCP_URL:-http://172.16.3.136:8101}
+      REMOTE_MCP_TOKEN: ${REMOTE_MCP_TOKEN:-}
+      REMOTE_MCP_TIMEOUT: ${REMOTE_MCP_TIMEOUT:-10}
+
+      # ── detection-MCP / VLM (화면 판정) — 사내망 HTTP, 엔드포인트 미확정 ─
+      # backend 를 detection 으로 바꿀 때만 유효. POST /classify 가정.
+      DETECTION_MCP_URL: ${DETECTION_MCP_URL:-http://172.16.3.136:8103}
+      DETECTION_MCP_TIMEOUT: ${DETECTION_MCP_TIMEOUT:-30}
+      CALIBRATION_PROMPT: ${CALIBRATION_PROMPT:-}
+    # .env 파일이 있으면 자동 로드(위 기본값을 덮어씀). 없으면 위 기본값 사용.
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      # 학습된 네비게이션 맵(JSON) 영속화 — 컨테이너 재기동에도 맵 유지.
+      - ./data:/app/data
+    restart: unless-stopped
+
+    # ── 사내망 연결 안내 ────────────────────────────────────────────
+    # remote-MCP / detection-MCP 는 사내망 172.16.x 대역에 있다.
+    # Mac(Docker Desktop) 에서는 컨테이너가 호스트와 다른 네트워크 네임스페이스에 있으므로,
+    # 호스트 LAN 상의 172.16.x MCP 로 나가는 트래픽은 Docker Desktop 이 자동 라우팅한다
+    # (별도 설정 불필요; 사내망 도달성은 호스트 Mac mini 의 네트워크에 의존).
+    #
+    # 만약 MCP 가 "호스트 자신"에서 도는 경우엔 host.docker.internal 로 지칭:
+    #   REMOTE_MCP_URL=http://host.docker.internal:8101
+    #   extra_hosts:
+    #     - "host.docker.internal:host-gateway"
+    #
+    # 사내망 라우팅/방화벽 이슈로 컨테이너가 172.16.x 에 못 붙으면 host 네트워크를 고려
+    # (Linux 한정; macOS Docker Desktop 에서는 network_mode: host 미지원):
+    #   network_mode: host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

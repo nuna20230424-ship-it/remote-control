@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>STB 리모컨 학습 에이전트</title>
+  <meta name="description" content="셋탑박스 리모컨 학습 · 네비게이션 맵 · 목표기반 실행 계기판" />
+  <!--
+    자족 대시보드(R7): 외부 CDN/폰트/스크립트 0.
+    자산은 동일 출처 상대경로로만 로드한다 (./styles.css, ./app.js).
+    계기판(방송 엔지니어링 콘솔) 정체성 — 어두운 계기판 위 인광 신호.
+    4개 작업 영역: 시스템 상태 바 / 조작 레일(학습·목표) / 맵 캔버스 / 실행·관측 결과.
+    엔드포인트: GET /health, POST /learn, GET /map, GET /map/path, POST /goal.
+    이 문서는 시맨틱 골격만 정의한다. 상태 관리/렌더링은 app.js, 스타일은 styles.css.
+  -->
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+
+  <!-- Toast 영역: fetch 실패 등 사람이 읽는 오류를 app.js 가 append -->
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       #statusbar — 고정 상단 시스템 상태 바
+       제품 마크 · 드라이버/센스 백엔드 칩 · 상태/전이/커버리지 카운터
+       · 미탐색 배지 · 학습 라이브 인디케이터(맥동)
+       ═══════════════════════════════════════════════════════════════ -->
+  <header id="statusbar" class="statusbar" role="banner">
+    <div class="statusbar__brand">
+      <span class="statusbar__glyph" aria-hidden="true">◉</span>
+      <span class="statusbar__title" style="text-wrap:balance">STB 리모컨 학습 에이전트</span>
+      <span class="statusbar__sub label">REMOTE CONTROL · LEARNING AGENT</span>
+    </div>
+
+    <!-- 백엔드 정체: 드라이버(제어) / 센스(판정) — /health 근거 -->
+    <div class="statusbar__backends" aria-label="백엔드 상태">
+      <span class="chip chip--backend" id="chip-driver" title="리모컨 드라이버 백엔드">
+        <span class="chip__label label">DRIVER</span>
+        <span class="chip__value mono" id="chip-driver-name">—</span>
+        <span class="dot dot--idle" id="chip-driver-dot" aria-hidden="true"></span>
+      </span>
+      <span class="chip chip--backend" id="chip-sense" title="화면 판정 센스 백엔드">
+        <span class="chip__label label">SENSE</span>
+        <span class="chip__value mono" id="chip-sense-name">—</span>
+        <span class="dot dot--idle" id="chip-sense-dot" aria-hidden="true"></span>
+      </span>
+    </div>
+
+    <!-- 맵 요약 카운터 (요약 먼저) — 수치는 mono + tabular-nums -->
+    <div class="statusbar__counters" aria-label="맵 요약">
+      <div class="counter" title="식별된 화면 상태 수">
+        <span class="counter__num mono tnum" id="counter-states">0</span>
+        <span class="counter__lbl label">STATES</span>
+      </div>
+      <div class="counter" title="관측된 전이(엣지) 수">
+        <span class="counter__num mono tnum" id="counter-transitions">0</span>
+        <span class="counter__lbl label">TRANSITIONS</span>
+      </div>
+      <div class="counter" title="버튼셋 대비 탐색 커버리지">
+        <span class="counter__num mono tnum" id="counter-coverage">—</span>
+        <span class="counter__lbl label">COVERAGE</span>
+      </div>
+      <span class="badge badge--unexplored" id="badge-unexplored" hidden title="미탐색 간선 수">
+        <span class="mono tnum" id="badge-unexplored-num">0</span>
+        <span class="label">미탐색</span>
+      </span>
+    </div>
+
+    <!-- 학습 라이브 인디케이터: 학습 중 맥동(prefers-reduced-motion 존중은 styles.css) -->
+    <div class="statusbar__live" id="live-indicator" data-state="idle" aria-live="polite">
+      <span class="live__pulse" aria-hidden="true"></span>
+      <span class="live__text label" id="live-text">대기</span>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       워크벤치 — 2열: 좌 조작 레일(~360px) / 우 관측 캔버스
+       <1024px 에서 1열 스택 (styles.css)
+       ═══════════════════════════════════════════════════════════════ -->
+  <main class="workbench" role="main">
+
+    <!-- ── 좌: 조작 레일 (학습 / 목표) ─────────────────────────────── -->
+    <aside class="rail" aria-label="조작 레일">
+
+      <!-- #learn-panel — UC-1 탐색 학습 -->
+      <section id="learn-panel" class="panel" aria-labelledby="learn-panel-h">
+        <header class="panel__head">
+          <h2 id="learn-panel-h" class="panel__title" style="text-wrap:balance">학습 <span class="label panel__tag">EXPLORE · UC-1</span></h2>
+        </header>
+
+        <div class="panel__body">
+          <form id="learn-form" class="field-grid" novalidate>
+            <div class="field">
+              <label for="learn-step-budget" class="label">STEP BUDGET</label>
+              <input
+                type="number" id="learn-step-budget" name="step_budget"
+                class="input mono tnum" min="1" max="10000" step="1" value="200"
+                inputmode="numeric" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="learn-coverage-target" class="label">COVERAGE TARGET</label>
+              <input
+                type="number" id="learn-coverage-target" name="coverage_target"
+                class="input mono tnum" min="0" max="1" step="0.05" value="0.90"
+                inputmode="decimal" autocomplete="off" />
+            </div>
+
+            <div class="field field--actions">
+              <button type="submit" id="btn-learn-start" class="btn btn--primary">
+                <span class="btn__label">학습 시작</span>
+              </button>
+              <button type="button" id="btn-learn-stop" class="btn btn--ghost" disabled>
+                <span class="btn__label">중지</span>
+              </button>
+            </div>
+          </form>
+
+          <!-- 진행 막대: 학습 중 노출 -->
+          <div class="progress" id="learn-progress" hidden>
+            <div class="progress__track" role="progressbar"
+                 aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="학습 진행률">
+              <div class="progress__fill" id="learn-progress-fill" style="width:0%"></div>
+            </div>
+            <span class="progress__pct mono tnum" id="learn-progress-label">0%</span>
+          </div>
+
+          <!-- LearningSummary 요약 (학습 종료 후) -->
+          <div class="summary" id="learn-summary" hidden aria-live="polite">
+            <div class="summary__row">
+              <span class="label">SESSION</span>
+              <span class="mono" id="ls-session">—</span>
+            </div>
+            <dl class="stat-grid">
+              <div class="stat">
+                <dt class="label">스텝</dt>
+                <dd class="mono tnum" id="ls-steps">0</dd>
+              </div>
+              <div class="stat">
+                <dt class="label">방문 상태</dt>
+                <dd class="mono tnum" id="ls-states">0</dd>
+              </div>
+              <div class="stat">
+                <dt class="label">기록 전이</dt>
+                <dd class="mono tnum" id="ls-transitions">0</dd>
+              </div>
+              <div class="stat">
+                <dt class="label">미탐색 간선</dt>
+                <dd class="mono tnum" id="ls-unexplored">0</dd>
+              </div>
+            </dl>
+            <div class="meter">
+              <div class="meter__bar">
+                <div class="meter__fill" id="ls-coverage-fill" style="width:0%"></div>
+              </div>
+              <span class="meter__caption">
+                <span class="label">커버리지</span>
+                <span class="mono tnum" id="ls-coverage">0%</span>
+              </span>
+            </div>
+            <div class="summary__row">
+              <span class="label">종료 사유</span>
+              <span class="pill" id="ls-stop-reason">—</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- #goal-panel — UC-3 목표기반 계획·실행 -->
+      <section id="goal-panel" class="panel" aria-labelledby="goal-panel-h">
+        <header class="panel__head">
+          <h2 id="goal-panel-h" class="panel__title" style="text-wrap:balance">목표 <span class="label panel__tag">GOAL · UC-3</span></h2>
+        </header>
+
+        <div class="panel__body">
+          <form id="goal-form" class="goal-form" novalidate>
+            <div class="field">
+              <label for="goal-text" class="label">자연어 목표</label>
+              <div class="goal-input-row">
+                <input
+                  type="text" id="goal-text" name="text"
+                  class="input" placeholder="예: 넷플릭스 켜줘"
+                  autocomplete="off" enterkeyhint="go" />
+                <button type="submit" id="btn-goal-run" class="btn btn--primary">
+                  <span class="btn__label">실행</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- 빠른 목표 칩: app.js 가 클릭 시 goal-text 채움 -->
+            <div class="quick-chips" id="goal-quick-chips" aria-label="빠른 목표">
+              <button type="button" class="chip chip--action" data-goal="넷플릭스 켜줘">넷플릭스 켜줘</button>
+              <button type="button" class="chip chip--action" data-goal="유튜브 켜줘">유튜브 켜줘</button>
+              <button type="button" class="chip chip--action" data-goal="설정 열어줘">설정 열어줘</button>
+              <button type="button" class="chip chip--action" data-goal="홈으로">홈으로</button>
+            </div>
+          </form>
+
+          <!-- 계획 미리보기 스텝 리스트 (실행 전 plan) -->
+          <div class="plan-preview" id="goal-plan-preview" hidden>
+            <div class="plan-preview__head">
+              <span class="label">계획 미리보기</span>
+              <span class="mono tnum" id="goal-plan-count" title="스텝 수">0</span>
+            </div>
+            <ol class="plan-steps" id="goal-plan-steps"></ol>
+          </div>
+
+          <!-- ExecutionResult 요약: status pill · button_sequence 칩 · replans 배지 -->
+          <div class="exec-summary" id="goal-result" hidden aria-live="polite">
+            <div class="exec-summary__head">
+              <span class="pill" id="goal-status-pill" data-status="idle">—</span>
+              <span class="badge badge--replans" id="goal-replans-badge" hidden title="재계획 횟수">
+                <span class="label">재계획</span>
+                <span class="mono tnum" id="goal-replans-num">0</span>
+              </span>
+            </div>
+            <p class="exec-summary__note" id="goal-resolve-note" hidden></p>
+            <div class="button-seq" id="goal-button-seq" aria-label="버튼 시퀀스"></div>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <!-- ── 우: 관측 캔버스 (맵 지배 + 실행 트레이스 + 관측 로그) ─────── -->
+    <section class="canvas" aria-label="관측 캔버스">
+
+      <!-- #map-canvas — UC-2 네비게이션 맵(상태 그래프) SVG -->
+      <section id="map-canvas" class="panel panel--map" aria-labelledby="map-canvas-h">
+        <header class="panel__head panel__head--toolbar">
+          <h2 id="map-canvas-h" class="panel__title" style="text-wrap:balance">네비게이션 맵 <span class="label panel__tag">STATE GRAPH · UC-2</span></h2>
+
+          <div class="map-toolbar" role="toolbar" aria-label="맵 도구">
+            <div class="map-search">
+              <input
+                type="search" id="map-search" class="input input--search mono"
+                placeholder="상태/라벨 검색" autocomplete="off" aria-label="맵 검색" />
+            </div>
+
+            <div class="map-filter">
+              <label for="map-filter-kind" class="label sr-only">종류 필터</label>
+              <select id="map-filter-kind" class="input input--select" aria-label="상태 종류 필터">
+                <option value="">전체 종류</option>
+                <option value="home">home</option>
+                <option value="launcher">launcher</option>
+                <option value="app">app</option>
+                <option value="menu">menu</option>
+                <option value="dialog">dialog</option>
+                <option value="unknown">unknown</option>
+              </select>
+            </div>
+
+            <div class="map-zoom" role="group" aria-label="확대/축소">
+              <button type="button" class="btn btn--ghost btn--icon" id="map-zoom-out" title="축소" aria-label="축소">−</button>
+              <span class="map-zoom__level mono tnum" id="map-zoom-level">100%</span>
+              <button type="button" class="btn btn--ghost btn--icon" id="map-zoom-in" title="확대" aria-label="확대">+</button>
+              <button type="button" class="btn btn--ghost btn--icon" id="map-zoom-fit" title="화면에 맞춤" aria-label="화면에 맞춤">⤢</button>
+            </div>
+
+            <button type="button" class="btn btn--secondary" id="map-refresh" title="맵 새로고침">
+              <span class="btn__label">새로고침</span>
+            </button>
+          </div>
+        </header>
+
+        <div class="panel__body panel__body--map">
+          <!-- SVG 맵 컨테이너: app.js renderMap 이 노드(ScreenState)/엣지(Transition) 렌더 -->
+          <div class="map-viewport" id="map-viewport">
+            <svg id="map-svg" class="map-svg" role="img"
+                 aria-label="네비게이션 맵 상태 그래프" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <!-- 엣지 화살촉: 일반 / 신호(현재 경로 하이라이트) -->
+                <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4"
+                        orient="auto" markerUnits="userSpaceOnUse">
+                  <path d="M0,0 L8,4 L0,8 Z" class="edge-arrow" />
+                </marker>
+                <marker id="arrow-signal" markerWidth="9" markerHeight="9" refX="8" refY="4.5"
+                        orient="auto" markerUnits="userSpaceOnUse">
+                  <path d="M0,0 L9,4.5 L0,9 Z" class="edge-arrow edge-arrow--signal" />
+                </marker>
+              </defs>
+              <g id="map-edges" class="map-layer"></g>
+              <g id="map-nodes" class="map-layer"></g>
+            </svg>
+
+            <!-- 엠프티 스테이트: 맵이 비었을 때 -->
+            <div class="empty-state" id="map-empty">
+              <span class="empty-state__glyph" aria-hidden="true">⌗</span>
+              <p class="empty-state__title">맵이 비어 있습니다</p>
+              <p class="empty-state__hint">좌측 <b>학습 시작</b>으로 화면 전이를 관찰하면 상태 그래프가 여기 그려집니다.</p>
+            </div>
+          </div>
+
+          <!-- 범례: 색만으로 상태 전달 금지 → 텍스트 병기 -->
+          <div class="map-legend" aria-label="맵 범례">
+            <span class="legend-item"><span class="legend-swatch legend-swatch--home" aria-hidden="true"></span><span class="label">home/root</span></span>
+            <span class="legend-item"><span class="legend-swatch legend-swatch--app" aria-hidden="true"></span><span class="label">app</span></span>
+            <span class="legend-item"><span class="legend-swatch legend-swatch--menu" aria-hidden="true"></span><span class="label">menu/launcher</span></span>
+            <span class="legend-item"><span class="legend-swatch legend-swatch--unknown" aria-hidden="true"></span><span class="label">unknown</span></span>
+            <span class="legend-item"><span class="legend-ring" aria-hidden="true"></span><span class="label">저신뢰(warn)</span></span>
+            <span class="legend-item"><span class="legend-line legend-line--signal" aria-hidden="true"></span><span class="label">현재 경로</span></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 하단: 실행 트레이스 + 관측 로그 (2열, 좁으면 스택) -->
+      <div class="results-grid">
+
+        <!-- #exec-trace — 실행 스텝 트레이스 테이블 -->
+        <section id="exec-trace" class="panel" aria-labelledby="exec-trace-h">
+          <header class="panel__head">
+            <h2 id="exec-trace-h" class="panel__title" style="text-wrap:balance">실행 트레이스 <span class="label panel__tag">STEP TRACE</span></h2>
+          </header>
+          <div class="panel__body panel__body--table">
+            <div class="table-wrap">
+              <table class="data-table" id="exec-trace-table">
+                <thead>
+                  <tr>
+                    <th class="col-idx label" scope="col">#</th>
+                    <th class="label" scope="col">FROM</th>
+                    <th class="label" scope="col">KEY</th>
+                    <th class="label" scope="col">EXPECTED</th>
+                    <th class="label" scope="col">ACTUAL</th>
+                    <th class="col-match label" scope="col">MATCH</th>
+                  </tr>
+                </thead>
+                <!-- app.js: PlanStep 행 (matched=good 스트라이프 / mismatch=crit) -->
+                <tbody id="exec-trace-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state empty-state--inline" id="exec-trace-empty">
+              <p class="empty-state__hint">목표를 실행하면 스텝별 계획·검증 트레이스가 여기 표시됩니다.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- #obs-log — 관측 로그 테이블 (overflow-x 래퍼) -->
+        <section id="obs-log" class="panel" aria-labelledby="obs-log-h">
+          <header class="panel__head">
+            <h2 id="obs-log-h" class="panel__title" style="text-wrap:balance">관측 로그 <span class="label panel__tag">OBSERVATIONS</span></h2>
+          </header>
+          <div class="panel__body panel__body--table">
+            <div class="table-wrap">
+              <table class="data-table" id="obs-log-table">
+                <thead>
+                  <tr>
+                    <th class="col-idx label" scope="col">SEQ</th>
+                    <th class="label" scope="col">FROM</th>
+                    <th class="label" scope="col">KEY</th>
+                    <th class="label" scope="col">TO</th>
+                    <th class="col-conf label" scope="col">CONF</th>
+                  </tr>
+                </thead>
+                <!-- app.js: Observation 링버퍼 행(최신순) -->
+                <tbody id="obs-log-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state empty-state--inline" id="obs-log-empty">
+              <p class="empty-state__hint">학습/실행 중 관측된 전이가 최신순으로 쌓입니다.</p>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>

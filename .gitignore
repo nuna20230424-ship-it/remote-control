@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 가상환경
+.venv/
+venv/
+env/
+ENV/
+
+# 테스트/커버리지
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+
+# 환경설정
+.env
+.env.local
+*.local
+
+# 런타임 산출물 (맵 저장, 스크린샷 등)
+*.map.json
+navmap_store/
+data/*.json
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
