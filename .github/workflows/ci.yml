@@ -1,0 +1,57 @@
+# remotectl CI — Python 3.12 에서 설치 → ruff 린트 → pytest 실행.
+# 트리거: main 브랜치 push 와 모든 PR. 수동 실행(workflow_dispatch)도 허용.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 같은 브랜치/PR 에서 새 커밋이 올라오면 진행 중이던 런을 취소해 러너를 절약한다.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: lint + test (py3.12)
+    runs-on: ubuntu-latest
+    # 테스트는 Mock 드라이버/센스만으로 엔드투엔드 완결 — 사내망 MCP 불필요.
+    # 실 엔드포인트로 새 나가지 않도록 CI 에서는 항상 mock 백엔드를 강제한다.
+    env:
+      REMOTECTL_DRIVER_BACKEND: mock
+      REMOTECTL_SENSE_BACKEND: mock
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install (editable + dev)
+        run: |
+          python -m pip install -U pip
+          # editable 설치로 src 레이아웃을 sys.path 에 올린다(PYTHONPATH 불필요).
+          pip install -e ".[dev]"
+
+      # ── 린트/포맷은 리포트 전용(비차단) ─────────────────────────
+      # 리포지토리가 아직 전면 lint/format-clean 하지 않아, 지금 차단으로 켜면
+      # 첫 런부터 무관한 파일 때문에 CI 가 상시 red 가 된다. 우선 리포트로 노출하고
+      # 클린업 후 `continue-on-error` 를 제거해 게이트로 승격한다.
+      - name: Ruff lint (report-only)
+        continue-on-error: true
+        run: ruff check --output-format=github src tests
+
+      - name: Ruff format check (report-only)
+        continue-on-error: true
+        run: ruff format --check src tests
+
+      - name: Pytest
+        # 하드 게이트: Mock 엔드투엔드(학습→맵→목표실행) + 계약 + 아키텍처 임포트 검사.
+        run: pytest -q
