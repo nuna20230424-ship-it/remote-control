@@ -118,6 +118,39 @@ PYTHONPATH=src pytest -q
 
 ---
 
+## 다른 AI 에이전트에서 도구로 호출 (MCP)
+
+상위 오케스트레이터 에이전트(예: `stb-ai-tc-automation`)가 remotectl을 **도구**로 쓰도록
+MCP 서버를 제공한다. 엔진을 인프로세스로 재사용하며 백엔드/맵경로는 전부 환경변수로 결정된다.
+
+```bash
+pip install -e ".[mcp]"        # 선택 의존성(mcp) 설치
+python -m remotectl.mcp_server # stdio 트랜스포트로 기동 (또는 remotectl-mcp)
+```
+
+노출 도구: `remote_learn`(UC-1) · `remote_inspect_map`(UC-2) · `remote_find_path` · `remote_run_goal`(UC-3).
+
+오케스트레이터 MCP 설정 등록 예:
+
+```jsonc
+{ "mcpServers": {
+  "remotectl": {
+    "command": "python", "args": ["-m", "remotectl.mcp_server"],
+    "env": {
+      "REMOTECTL_DRIVER_BACKEND": "mcp",            // 실 STB. 개발은 "mock"
+      "REMOTE_MCP_URL": "http://172.16.x.x:PORT",   // mcp_client.py TODO 배선 후
+      "REMOTECTL_SENSE_BACKEND": "detection",       // 개발은 "mock"
+      "REMOTECTL_MAP_STORE_PATH": "/shared/navmap.json"  // learn/goal 이 공유(볼륨 마운트)
+    }}}}
+```
+
+> **주의**: (1) `learn`과 `goal`은 같은 `REMOTECTL_MAP_STORE_PATH`를 공유해야 한다(별도
+> 프로세스면 공유 볼륨). (2) 물리 STB는 공유 자원이므로 오케스트레이터에서 호출을 직렬화하라.
+> (3) 미학습 상태의 `goal`은 `failed_unresolved`/`failed_unreachable`로 정규화되니, 그 신호를
+> 보고 먼저 `remote_learn`을 호출하도록 설계하면 견고하다. REST(`/learn`·`/goal`)로도 동일하게 가능.
+
+---
+
 ## 실 remote-MCP / detection-MCP 배선
 
 실 엔드포인트는 **미확정**이다. 어댑터(`drivers/mcp_client.py`, `sense/detection_mcp.py`)는 가정한 MCP 계약으로 스텁을 채워 두고, 실물이 확정되면 코드 안의 `[WIRE-*]` 표식 지점만 교체하면 된다. 코어 엔진 변경은 0줄이다(R1/M5).

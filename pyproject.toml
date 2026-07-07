@@ -20,16 +20,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# MCP 서버 노출용(다른 AI 에이전트가 도구로 호출). 코어/REST 사용에는 불필요.
+mcp = [
+    "mcp>=1.2",
+]
 dev = [
     "pytest",
     "pytest-asyncio",
     "ruff",
     "httpx",
+    "mcp>=1.2",
 ]
 
 [project.scripts]
 # CLI 진입점: 명세상 main 은 api/app.py 에 있다(remotectl.cli 모듈은 존재하지 않음).
 remotectl = "remotectl.api.app:main"
+# MCP 서버 진입점(stdio). `pip install 'remotectl[mcp]'` 후 사용.
+remotectl-mcp = "remotectl.mcp_server:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -38,7 +45,7 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-remotectl = ["web/static/*", "api/static/*"]
+remotectl = ["api/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
