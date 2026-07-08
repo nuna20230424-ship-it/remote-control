@@ -1,51 +1,36 @@
-"""RemoteMcpClient — 사내망 remote-MCP(HTTP)로 실제 STB 를 제어하는 RemoteDriver 어댑터.
+"""RemoteMcpClient — 사내 STB 스택(ir-mcp + capture-mcp)으로 실제 STB 를 제어하는 RemoteDriver.
 
-상태: 스텁(계약 골격). 실제 엔드포인트가 미확정이므로(PRD R1) HTTP 요청 형태를
-"가정한 MCP 계약"으로 명시해 두고, 실물이 확정되면 아래 [WIRE] 표식 지점만 채우면 된다.
-코어 엔진은 이 클래스의 내부를 모르며, RemoteDriver 계약만 본다(M5).
+실물 계약(2026-07 stb-ai-tc-automation 조사 확정)에 맞춰 배선됨. 가정했던 단일 remote-MCP
+(`/press`·`/capture`)는 실재하지 않고, 제어와 캡처가 **두 서비스**로 분리돼 있다.
 
 ============================================================================
-가정한 MCP 계약 (assumed contract) — 실물 확정 시 이 표를 정본과 대조하라
+실물 계약 (as-wired)
 ============================================================================
-전송: HTTP/JSON, base URL = 환경변수 REMOTE_MCP_URL (예: http://172.16.3.xxx:PORT).
-      (detection-mcp 가 172.16.3.136:8103 인 것으로 보아 remote-MCP 도 172.16.3.x 대역으로 추정.)
+1) 리모컨 제어 = **ir-mcp** (FastAPI, base = IR_MCP_URL, 예: http://172.16.3.x:8002)
+     POST /send   req {"codeset": "<codeset>", "key": "<KEY>"}
+                  res {"codeset","resolved_codeset","key","backend","response"}  (성공=HTTP2xx)
+     GET  /health res {"status":"ok","service":"ir-mcp","backend":"itach",...}
+   - repeat 파라미터 없음 → key.repeat 만큼 /send 를 N회 호출.
+   - reset 엔드포인트 없음 → HOME 키를 REMOTECTL_RESET_HOME_PRESSES 회 눌러 폴백.
+   - codeset(REMOTECTL_IR_CODESET) 는 대상 단말/리모컨에 맞춰야 한다(예: ref_remote/kt_new).
 
-가정 오퍼레이션(operation):
-  1) press      — 리모컨 키 입력
-       POST {base}/press
-       req : {"key": "<CANONICAL_KEY>", "repeat": <int>, "app": "<app_id|null>"}
-       res : {"ok": true}                                  (본문 형식 미확정)
-  2) capture    — 현재 화면 캡처
-       GET  {base}/capture   (or POST; 미확정)
-       res : {"image_ref": "<url|path>", "image_b64": "<...|null>",
-              "mime": "image/png", "text": "<osd/debug|null>", "meta": {...}}
-  3) reset      — 시작 지점(HOME)으로 복귀
-       POST {base}/reset
-       res : {"ok": true}
-  4) health     — 도달성/준비 확인(옵션)
-       GET  {base}/health
-       res : {"status": "ok", "target": "<stb model/host>"}
+2) 화면 캡처 = **capture-mcp** (FastAPI, base = CAPTURE_MCP_URL, 예: http://172.16.3.x:8001)
+     POST /capture req {"target":"dut","duration_sec":<int>,"label":<str|null>}
+                   res {"file_path":"/data/captures/xxx.mp4", ...}  (N초 **영상**)
+   - capture-mcp 는 스틸이 아니라 MP4 를 준다 → ffmpeg 로 **마지막 프레임**을 추출해 스틸로 쓴다.
+   - file_path 는 이 프로세스가 읽을 수 있어야 한다(capture-mcp 와 공유 볼륨 가정).
+   - CAPTURE_MCP_URL 미설정이면 capture() 는 DriverUnavailableError(캡처 미가용).
 
-키코드 매핑(canonical Button -> MCP 키 문자열):
-  아래 _DEFAULT_KEYMAP 은 "추정"이다. 실물 remote-MCP 가 기대하는 키 문자열
-  (예: "KEY_HOME", "0x0A", "netflix" 등)에 맞게 [WIRE-KEYMAP] 에서 교체하라.
-
-미확정/사용자 확인 필요 사항([WIRE] 지점):
-  - [WIRE-URL]     : REMOTE_MCP_URL 실제 host:port/경로 프리픽스.
-  - [WIRE-PATHS]   : 각 오퍼레이션의 실제 method + path.
-  - [WIRE-KEYMAP]  : canonical Button -> 실제 키코드 문자열.
-  - [WIRE-PRESS]   : press 요청 바디 스키마(단발 vs repeat 파라미터 vs N회 호출).
-  - [WIRE-CAPTURE] : capture 응답 파싱(이미지가 URL 인가 base64 인가, 필드명).
-  - [WIRE-RESET]   : reset 이 별도 오퍼레이션인가, 아니면 HOME 다중 press 로 대체인가.
-  - [WIRE-AUTH]    : 인증 헤더/토큰 필요 여부(REMOTE_MCP_TOKEN 예약).
-  - [WIRE-ERRORS]  : 실패 응답 형태(HTTP status vs 바디 ok=false) → 예외 매핑.
+키맵(canonical Button → ir-mcp 키명)은 아래 DEFAULT_KEYMAP 참조. 코드셋별로 없는 키는
+ir-mcp 가 4xx 로 거절 → PressError 로 정규화된다.
 ============================================================================
 """
 
 from __future__ import annotations
 
-import base64
 import os
+import shutil
+import subprocess
 from typing import Optional
 
 import httpx
@@ -64,128 +49,243 @@ __all__ = ["RemoteMcpClient", "DEFAULT_KEYMAP"]
 
 
 # --------------------------------------------------------------------------- #
-# [WIRE-KEYMAP] canonical Button -> remote-MCP 가 기대하는 키 문자열 (추정)
+# canonical Button → ir-mcp 코드셋 키명 (실물 kt_new/ref_remote 키 어휘 기준)
 # --------------------------------------------------------------------------- #
-# 실물이 "KEY_HOME" / "0x..." / 소문자 등 무엇을 원하는지 확인 후 값을 교체하라.
-# 여기서는 우선 canonical 심볼 그대로 보낸다(가장 무해한 기본값).
-DEFAULT_KEYMAP: dict[Button, str] = {b: b.value for b in Button}
+# 방향키는 DPAD_*, 음량은 VOLUME_*, 숫자는 "0"~"9". 코드셋에 따라 일부 키가 없을 수 있으며,
+# 그 경우 ir-mcp 가 4xx 를 반환해 PressError 로 정규화된다.
+DEFAULT_KEYMAP: dict[Button, str] = {
+    Button.HOME: "HOME",
+    Button.BACK: "BACK",
+    Button.UP: "DPAD_UP",
+    Button.DOWN: "DPAD_DOWN",
+    Button.LEFT: "DPAD_LEFT",
+    Button.RIGHT: "DPAD_RIGHT",
+    Button.OK: "OK",
+    Button.MENU: "MENU",
+    Button.EXIT: "EXIT",
+    Button.PLAY_PAUSE: "PLAY_PAUSE",
+    Button.STOP: "STOP",
+    Button.REWIND: "REWIND",
+    Button.FAST_FORWARD: "FAST_FORWARD",
+    Button.VOL_UP: "VOLUME_UP",
+    Button.VOL_DOWN: "VOLUME_DOWN",
+    Button.MUTE: "MUTE",
+    Button.CH_UP: "CH_UP",
+    Button.CH_DOWN: "CH_DOWN",
+    Button.POWER: "POWER",
+    Button.NUM_0: "0",
+    Button.NUM_1: "1",
+    Button.NUM_2: "2",
+    Button.NUM_3: "3",
+    Button.NUM_4: "4",
+    Button.NUM_5: "5",
+    Button.NUM_6: "6",
+    Button.NUM_7: "7",
+    Button.NUM_8: "8",
+    Button.NUM_9: "9",
+}
+
+
+def _env_int(name: str, default: int) -> int:
+    """환경변수를 int 로 파싱(빈 값/미설정/파싱 실패 시 기본값)."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return default
 
 
 class RemoteMcpClient(RemoteDriver):
-    """remote-MCP HTTP 어댑터(스텁).
+    """ir-mcp(제어) + capture-mcp(캡처) HTTP 어댑터.
 
-    엔드포인트 확정 전이라 실제 요청/응답 파싱은 [WIRE] 지점에 TODO 로 표시되어 있고,
-    지금은 호출 형태만 갖춘 채 명확한 예외로 "미배선" 을 알린다. 배선 후에는 Mock 과
-    동일하게 RemoteDriver 로서 엔진에 그대로 꽂힌다.
+    코어 엔진은 이 클래스 내부를 모르며 RemoteDriver 계약만 본다(M5). MockRemoteDriver 와
+    동일하게 학습/실행 엔진에 그대로 꽂힌다.
 
     구성
     ----
-    - base_url: REMOTE_MCP_URL. from_env() 로 환경변수에서 읽는다.
-    - keymap: canonical Button -> 실제 키 문자열([WIRE-KEYMAP]).
-    - timeout: HTTP 타임아웃(초). 도달불가/지연은 DriverUnavailableError 로 승격.
-    - token: 인증 토큰(REMOTE_MCP_TOKEN, [WIRE-AUTH]). 없으면 헤더 미첨부.
+    - base_url:     ir-mcp base URL(제어). from_env 가 IR_MCP_URL/REMOTE_MCP_URL 에서 읽는다.
+    - codeset:      /send 에 넘길 코드셋(REMOTECTL_IR_CODESET). 대상 단말/리모컨과 일치해야 함.
+    - capture_url:  capture-mcp base URL(옵션). 없으면 capture() 미가용.
+    - capture_target: "ref" | "dut"(REMOTECTL_CAPTURE_TARGET, 기본 dut).
+    - capture_duration_sec: 캡처 영상 길이 초(REMOTECTL_CAPTURE_DURATION_SEC, 기본 1).
+    - reset_home_presses: reset() 시 HOME 반복 횟수(REMOTECTL_RESET_HOME_PRESSES, 기본 1).
+    - keymap:       canonical Button → ir-mcp 키명.
+    - token/timeout: 인증/타임아웃.
     """
 
     def __init__(
         self,
         base_url: str,
         *,
+        codeset: str = "ref_remote",
+        capture_url: Optional[str] = None,
+        capture_target: str = "dut",
+        capture_duration_sec: int = 1,
+        reset_home_presses: int = 1,
         keymap: Optional[dict[Button, str]] = None,
-        timeout: float = 5.0,
+        timeout: float = 10.0,
         token: Optional[str] = None,
         client: Optional[httpx.Client] = None,
+        capture_client: Optional[httpx.Client] = None,
     ):
         if not base_url:
-            raise ValueError("base_url(REMOTE_MCP_URL) 가 필요합니다.")
+            raise ValueError("base_url(IR_MCP_URL/REMOTE_MCP_URL) 가 필요합니다.")
         self._base_url = base_url.rstrip("/")
+        self._codeset = codeset
+        self._capture_url = capture_url.rstrip("/") if capture_url else None
+        self._capture_target = capture_target
+        self._capture_duration_sec = max(1, int(capture_duration_sec))
+        self._reset_home_presses = max(0, int(reset_home_presses))
         self._keymap = dict(keymap or DEFAULT_KEYMAP)
         self._token = token
-        # 주입된 client(테스트에서 httpx.MockTransport 를 꽂기 위함)가 있으면 재사용.
+
         headers = {"Content-Type": "application/json"}
-        if token:  # [WIRE-AUTH] 실제 헤더 이름/스킴 확인 필요(Bearer? X-Token?).
+        if token:
             headers["Authorization"] = f"Bearer {token}"
         self._client = client or httpx.Client(
             base_url=self._base_url, timeout=timeout, headers=headers
         )
         self._owns_client = client is None
 
+        # capture-mcp 는 지연 시간이 커(영상 녹화) 별도 timeout 을 넉넉히 준다.
+        if capture_client is not None:
+            self._capture_client: Optional[httpx.Client] = capture_client
+            self._owns_capture_client = False
+        elif self._capture_url:
+            self._capture_client = httpx.Client(
+                base_url=self._capture_url,
+                timeout=timeout + self._capture_duration_sec + 30.0,
+                headers=headers,
+            )
+            self._owns_capture_client = True
+        else:
+            self._capture_client = None
+            self._owns_capture_client = False
+
     # --- 팩토리 ----------------------------------------------------------- #
 
     @classmethod
     def from_env(cls, **overrides) -> "RemoteMcpClient":
-        """환경변수로부터 구성. [WIRE-URL]
+        """환경변수로부터 구성.
 
-        - REMOTE_MCP_URL   : base URL(필수).
-        - REMOTE_MCP_TOKEN : 인증 토큰(옵션).
-        - REMOTE_MCP_TIMEOUT: 타임아웃 초(옵션, 기본 5).
+        - IR_MCP_URL | REMOTE_MCP_URL  : ir-mcp base URL(필수).
+        - REMOTECTL_IR_CODESET         : 코드셋(기본 ref_remote).
+        - CAPTURE_MCP_URL              : capture-mcp base URL(옵션; 없으면 capture 미가용).
+        - REMOTECTL_CAPTURE_TARGET     : ref | dut(기본 dut).
+        - REMOTECTL_CAPTURE_DURATION_SEC: 캡처 영상 초(기본 1).
+        - REMOTECTL_RESET_HOME_PRESSES : reset 시 HOME 반복(기본 1).
+        - REMOTE_MCP_TOKEN             : 인증 토큰(옵션).
+        - REMOTE_MCP_TIMEOUT           : 타임아웃 초(기본 10).
         """
-        base_url = overrides.pop("base_url", None) or os.environ.get("REMOTE_MCP_URL", "")
+        base_url = (
+            overrides.pop("base_url", None)
+            or os.environ.get("IR_MCP_URL")
+            or os.environ.get("REMOTE_MCP_URL", "")
+        )
         if not base_url:
             raise DriverUnavailableError(
-                "REMOTE_MCP_URL 미설정. 실 remote-MCP 배선 전이거나 환경변수 누락. "
+                "IR_MCP_URL/REMOTE_MCP_URL 미설정. 실 STB 배선 전이거나 환경변수 누락. "
                 "개발/테스트는 MockRemoteDriver 를 사용하라."
             )
-        token = overrides.pop("token", None) or os.environ.get("REMOTE_MCP_TOKEN")
+        kwargs: dict[str, object] = {
+            "codeset": overrides.pop("codeset", None)
+            or os.environ.get("REMOTECTL_IR_CODESET", "ref_remote"),
+            "capture_url": overrides.pop("capture_url", None)
+            or os.environ.get("CAPTURE_MCP_URL")
+            or None,
+            "capture_target": overrides.pop("capture_target", None)
+            or os.environ.get("REMOTECTL_CAPTURE_TARGET", "dut"),
+            "capture_duration_sec": overrides.pop("capture_duration_sec", None)
+            or _env_int("REMOTECTL_CAPTURE_DURATION_SEC", 1),
+            "reset_home_presses": overrides.pop("reset_home_presses", None)
+            or _env_int("REMOTECTL_RESET_HOME_PRESSES", 1),
+            "token": overrides.pop("token", None) or os.environ.get("REMOTE_MCP_TOKEN"),
+        }
         timeout = overrides.pop("timeout", None)
         if timeout is None:
-            timeout = float(os.environ.get("REMOTE_MCP_TIMEOUT", "5.0"))
-        return cls(base_url, token=token, timeout=timeout, **overrides)
+            timeout = float(os.environ.get("REMOTE_MCP_TIMEOUT", "10.0"))
+        kwargs["timeout"] = timeout
+        kwargs.update(overrides)
+        return cls(base_url, **kwargs)  # type: ignore[arg-type]
 
     # --- RemoteDriver 계약 ------------------------------------------------ #
 
     def press(self, key: KeyPress) -> None:
+        """ir-mcp POST /send 로 키를 송신한다(repeat 만큼 N회)."""
         mcp_key = self._map_key(key)
-        # [WIRE-PRESS] 요청 바디/경로/메서드를 실물 계약에 맞게 교체.
-        payload = {
-            "key": mcp_key,
-            "repeat": key.repeat,
-            "app": key.app_shortcut,  # APP_SHORTCUT 일 때만 값이 있음.
-        }
-        # [WIRE-PATHS] 실제 press 경로/메서드 확인.
-        resp = self._request("POST", "/press", json=payload)
-        self._raise_if_not_ok(resp, PressError, op="press")
+        # ir-mcp 는 repeat 파라미터가 없다 → repeat 횟수만큼 개별 /send.
+        for _ in range(key.repeat):
+            resp = self._request(
+                self._client, "POST", "/send",
+                json={"codeset": self._codeset, "key": mcp_key},
+            )
+            self._raise_if_not_ok(resp, PressError, op=f"send({mcp_key})")
 
     def capture(self) -> RawScreen:
-        # [WIRE-PATHS] 실제 capture 경로/메서드(GET vs POST) 확인.
-        resp = self._request("GET", "/capture")
+        """capture-mcp 로 짧은 영상을 녹화하고 마지막 프레임을 스틸(PNG)로 추출한다."""
+        if self._capture_client is None:
+            raise DriverUnavailableError(
+                "CAPTURE_MCP_URL 미설정 — 화면 캡처 미가용. capture-mcp base URL 을 배선하라."
+            )
+        resp = self._request(
+            self._capture_client, "POST", "/capture",
+            json={
+                "target": self._capture_target,
+                "duration_sec": self._capture_duration_sec,
+                "label": "remotectl-observe",
+            },
+        )
         self._raise_if_not_ok(resp, CaptureError, op="capture")
-        # [WIRE-CAPTURE] 응답 필드명/이미지 표현(URL vs base64) 을 실물에 맞게 파싱.
         try:
             data = resp.json()
         except Exception as e:  # noqa: BLE001
             raise CaptureError(f"capture 응답 JSON 파싱 실패: {e}") from e
 
-        image_bytes: Optional[bytes] = None
-        b64 = data.get("image_b64")
-        if b64:
-            try:
-                image_bytes = base64.b64decode(b64)
-            except Exception as e:  # noqa: BLE001
-                raise CaptureError(f"image_b64 디코드 실패: {e}") from e
+        file_path = data.get("file_path") or data.get("path")
+        if not file_path:
+            raise CaptureError(
+                "capture 응답에 file_path 가 없습니다. capture-mcp 계약 확인 필요."
+            )
 
+        image_bytes = self._extract_frame(file_path)
         return RawScreen(
-            image_ref=data.get("image_ref"),
+            image_ref=file_path,
             image_bytes=image_bytes,
-            image_mime=data.get("mime"),
-            text_hint=data.get("text"),
-            meta=data.get("meta") or {},
+            image_mime="image/png",
+            text_hint=None,
+            meta={
+                "capture_target": self._capture_target,
+                "duration_sec": data.get("duration") or self._capture_duration_sec,
+                "source": "capture-mcp",
+            },
         )
 
     def reset(self) -> None:
-        # [WIRE-RESET] 전용 reset 오퍼레이션이 없으면 HOME 다중 press 로 폴백하도록 교체.
-        resp = self._request("POST", "/reset")
-        self._raise_if_not_ok(resp, PressError, op="reset")
+        """ir-mcp 에 reset 오퍼레이션이 없으므로 HOME 키 반복으로 시작점(HOME) 복귀."""
+        home_key = self._keymap.get(Button.HOME, "HOME")
+        for _ in range(self._reset_home_presses):
+            resp = self._request(
+                self._client, "POST", "/send",
+                json={"codeset": self._codeset, "key": home_key},
+            )
+            self._raise_if_not_ok(resp, PressError, op="reset(HOME)")
 
     def info(self) -> DriverInfo:
         ready: Optional[bool] = None
         target: Optional[str] = None
-        # [WIRE-PATHS] health 오퍼레이션이 없으면 이 블록을 제거하거나 대체하라.
         try:
-            resp = self._request("GET", "/health")
+            resp = self._request(self._client, "GET", "/health")
             if resp.status_code == 200:
                 body = resp.json()
                 ready = body.get("status") == "ok"
-                target = body.get("target")
+                # ir-mcp health 는 backend 별 디바이스 정보를 함께 준다(itach/adb_target 등).
+                target = (
+                    body.get("backend")
+                    or body.get("adb_target")
+                    or body.get("itach")
+                )
             else:
                 ready = False
         except DriverUnavailableError:
@@ -193,61 +293,87 @@ class RemoteMcpClient(RemoteDriver):
         except Exception:  # noqa: BLE001  (health 는 부가 정보라 실패해도 info 는 반환)
             ready = None
         return DriverInfo(
-            name="remote-mcp",
+            name="ir-mcp",
             target=target,
             endpoint=self._base_url,
-            supports_capture=True,
+            supports_capture=self._capture_client is not None,
             ready=ready,
         )
 
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
+        if self._owns_capture_client and self._capture_client is not None:
+            self._capture_client.close()
 
     # --- 내부 헬퍼 -------------------------------------------------------- #
 
     def _map_key(self, key: KeyPress) -> str:
-        """canonical KeyPress -> remote-MCP 키 문자열. [WIRE-KEYMAP]
+        """canonical KeyPress → ir-mcp 키명.
 
-        APP_SHORTCUT 는 app_shortcut 식별자를 그대로 키로 쓴다(실물이 앱 실행을 어떻게
-        받는지에 따라 press 바디의 "app" 필드로 옮겨야 할 수도 있음 → [WIRE-PRESS]).
+        APP_SHORTCUT 는 앱 식별자를 대문자 키명으로 변환한다(예: "netflix" → "NETFLIX").
+        코드셋에 해당 앱 키가 있어야 실제 송신된다.
         """
         if key.button is Button.APP_SHORTCUT:
-            return key.app_shortcut or ""
+            if not key.app_shortcut:
+                raise PressError("APP_SHORTCUT 인데 app_shortcut 값이 없습니다.")
+            return key.app_shortcut.strip().upper()
         mapped = self._keymap.get(key.button)
         if mapped is None:
-            raise PressError(f"키맵에 없는 버튼: {key.button}. [WIRE-KEYMAP] 확인 필요.")
+            raise PressError(f"키맵에 없는 버튼: {key.button}.")
         return mapped
 
-    def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
-        """HTTP 요청 1회. 연결/타임아웃 실패는 DriverUnavailableError 로 승격. [WIRE-ERRORS]"""
+    def _extract_frame(self, file_path: str) -> bytes:
+        """ffmpeg 로 영상 파일의 마지막 프레임을 PNG 바이트로 추출한다.
+
+        press 직후 화면이 안정된 마지막 프레임을 쓴다(-sseof). ffmpeg 미설치/경로 접근 불가/
+        추출 실패는 CaptureError 로 정규화한다.
+        """
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise CaptureError(
+                "ffmpeg 를 찾을 수 없습니다 — capture-mcp 영상에서 프레임 추출 불가. "
+                "ffmpeg 설치 필요."
+            )
+        # -sseof -0.2 : 끝에서 0.2초 지점부터, -frames:v 1 : 한 프레임, PNG 로 stdout.
+        cmd = [
+            ffmpeg, "-nostdin", "-loglevel", "error",
+            "-sseof", "-0.2", "-i", file_path,
+            "-frames:v", "1", "-f", "image2", "-c:v", "png", "pipe:1",
+        ]
         try:
-            return self._client.request(method, path, **kwargs)
+            proc = subprocess.run(cmd, capture_output=True, timeout=30.0)
+        except FileNotFoundError as e:
+            raise CaptureError(f"ffmpeg 실행 실패: {e}") from e
+        except subprocess.TimeoutExpired as e:
+            raise CaptureError(f"ffmpeg 프레임 추출 타임아웃: {e}") from e
+        if proc.returncode != 0 or not proc.stdout:
+            err = proc.stderr.decode("utf-8", "replace")[:200] if proc.stderr else ""
+            raise CaptureError(
+                f"프레임 추출 실패(rc={proc.returncode}, path={file_path}): {err}. "
+                "파일 접근성(공유 볼륨) 확인 필요."
+            )
+        return proc.stdout
+
+    def _request(
+        self, client: httpx.Client, method: str, path: str, **kwargs
+    ) -> httpx.Response:
+        """HTTP 요청 1회. 연결/타임아웃 실패는 DriverUnavailableError 로 승격."""
+        try:
+            return client.request(method, path, **kwargs)
         except httpx.TimeoutException as e:
-            raise DriverUnavailableError(
-                f"remote-MCP 타임아웃({self._base_url}{path}): {e}"
-            ) from e
+            raise DriverUnavailableError(f"MCP 타임아웃({path}): {e}") from e
         except httpx.HTTPError as e:  # ConnectError/네트워크 등
             raise DriverUnavailableError(
-                f"remote-MCP 도달 불가({self._base_url}{path}): {e}. "
-                "사내망/엔드포인트/포트 확인 필요."
+                f"MCP 도달 불가({path}): {e}. 사내망/엔드포인트/포트 확인 필요."
             ) from e
 
     @staticmethod
     def _raise_if_not_ok(resp: httpx.Response, exc_type, *, op: str) -> None:
-        """응답 성공 판정. [WIRE-ERRORS]
-
-        지금은 HTTP status 만 본다. 실물이 200 + {"ok": false} 형태로 실패를 표현하면
-        여기서 바디의 ok 필드도 함께 검사하도록 교체하라.
-        """
+        """응답 성공 판정(ir-mcp/capture-mcp 는 성공을 HTTP 2xx 로 표현)."""
         if resp.status_code >= 500:
-            # 서버측 오류/미기동은 도달성 문제로 취급(진단 일관성).
             raise DriverUnavailableError(
-                f"remote-MCP {op} 서버 오류 {resp.status_code}: {resp.text[:200]}"
+                f"MCP {op} 서버 오류 {resp.status_code}: {resp.text[:200]}"
             )
         if resp.status_code >= 400:
-            raise exc_type(
-                f"remote-MCP {op} 실패 {resp.status_code}: {resp.text[:200]}"
-            )
-        # [WIRE-ERRORS] 필요 시:
-        #   body = resp.json(); if not body.get("ok", True): raise exc_type(...)
+            raise exc_type(f"MCP {op} 실패 {resp.status_code}: {resp.text[:200]}")

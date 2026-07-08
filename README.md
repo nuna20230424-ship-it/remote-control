@@ -151,9 +151,10 @@ python -m remotectl.mcp_server # stdio 트랜스포트로 기동 (또는 remotec
 
 ---
 
-## 실 remote-MCP / detection-MCP 배선
+## 실 STB 배선 (ir-mcp · capture-mcp · detection-mcp)
 
-실 엔드포인트는 **미확정**이다. 어댑터(`drivers/mcp_client.py`, `sense/detection_mcp.py`)는 가정한 MCP 계약으로 스텁을 채워 두고, 실물이 확정되면 코드 안의 `[WIRE-*]` 표식 지점만 교체하면 된다. 코어 엔진 변경은 0줄이다(R1/M5).
+어댑터는 사내 STB 스택의 **실물 계약**에 맞춰 배선돼 있다(2026-07 확정). 제어·캡처·판정이
+**세 서비스**로 분리돼 있고, 코어 엔진 변경은 0줄이다(M5).
 
 ### 1. 백엔드 선택 스위치
 
@@ -163,51 +164,54 @@ python -m remotectl.mcp_server # stdio 트랜스포트로 기동 (또는 remotec
 # 개발: mock (기본) / 실연동: mcp·detection 으로 전환
 REMOTECTL_DRIVER_BACKEND=mcp        # mock | mcp
 REMOTECTL_SENSE_BACKEND=detection   # mock | detection
-REMOTECTL_MAP_STORE_PATH=./data/navmap.json
-REMOTECTL_SETTLE_MS=400
 
-# remote-MCP (리모컨 제어)
-REMOTE_MCP_URL=http://172.16.3.136:8101   # 실 host:port 로 교체
-REMOTE_MCP_TOKEN=
-REMOTE_MCP_TIMEOUT=10
+# 리모컨 제어(ir-mcp): POST /send {codeset, key}
+IR_MCP_URL=http://172.16.3.136:8002
+REMOTECTL_IR_CODESET=ref_remote     # 대상 단말/리모컨에 맞는 코드셋
+REMOTECTL_RESET_HOME_PRESSES=1      # reset 엔드포인트 없음 → HOME 반복 폴백
 
-# detection-MCP / VLM (화면 판정)
+# 화면 캡처(capture-mcp): POST /capture → MP4 (ffmpeg 로 프레임 추출)
+CAPTURE_MCP_URL=http://172.16.3.136:8001
+REMOTECTL_CAPTURE_TARGET=dut
+REMOTECTL_CAPTURE_DURATION_SEC=1
+
+# 화면 판정(detection-mcp): POST /check/screen → verdict + description
 DETECTION_MCP_URL=http://172.16.3.136:8103
-DETECTION_MCP_TIMEOUT=30
-CALIBRATION_PROMPT=                        # 판정 정확도의 최대 레버(튜닝 후 채움)
+DETECTION_MCP_MODEL=qwen2.5vl:7b
 ```
 
-백엔드를 `mcp`/`detection` 으로 바꾸면 `api/deps.py` 가 `RemoteMcpClient.from_env()` / `DetectionMcpScreenSense.from_env()` 로 어댑터를 생성한다. `REMOTE_MCP_URL` 미설정 시 `DriverUnavailableError` 로 명확히 실패한다.
+백엔드를 `mcp`/`detection` 으로 바꾸면 `api/deps.py` 가 `RemoteMcpClient.from_env()` /
+`DetectionMcpScreenSense.from_env()` 로 어댑터를 생성한다. URL 미설정 시
+`DriverUnavailableError`/`SenseUnavailableError` 로 명확히 실패한다.
 
-### 2. remote-MCP 배선 지점 (`src/remotectl/drivers/mcp_client.py`)
+### 2. 리모컨 제어 — ir-mcp (`drivers/mcp_client.py`)
 
-가정 계약: `POST /press`, `GET /capture`, `POST /reset`, `GET /health`. 실물 확정 시 아래 표식을 교체한다.
+- `press` → `POST /send {codeset, key}`. `DEFAULT_KEYMAP` 이 canonical `Button` 을 ir-mcp
+  키명으로 매핑(방향키 `DPAD_*`, 음량 `VOLUME_*`, 숫자 `"0"~"9"`, 앱단축 대문자). repeat 는
+  ir-mcp 가 지원하지 않아 **N회 호출**로 처리.
+- `reset` → ir-mcp 에 reset 이 없어 **HOME 키 반복**(`REMOTECTL_RESET_HOME_PRESSES`)으로 폴백.
+- `info` → `GET /health` 의 `status`/`backend` 파싱.
+- **확인 필요**: `REMOTECTL_IR_CODESET` 이 대상 단말과 일치해야 실제 키가 송신된다
+  (`GET /codesets`, `GET /codesets/{codeset}` 로 사용 가능 키 확인).
 
-| 표식 | 교체 내용 |
-|------|-----------|
-| `[WIRE-URL]`     | `REMOTE_MCP_URL` 실제 host:port/경로 프리픽스 |
-| `[WIRE-PATHS]`   | 각 오퍼레이션의 실제 method + path |
-| `[WIRE-KEYMAP]`  | canonical `Button` → 실제 키코드 문자열(`DEFAULT_KEYMAP` 교체) |
-| `[WIRE-PRESS]`   | press 요청 바디 스키마(단발 vs repeat 파라미터 vs N회 호출) |
-| `[WIRE-CAPTURE]` | capture 응답 파싱(이미지가 URL 인가 base64 인가, 필드명) |
-| `[WIRE-RESET]`   | reset 전용 오퍼레이션인가, HOME 다중 press 폴백인가 |
-| `[WIRE-AUTH]`    | 인증 헤더 이름/스킴(`REMOTE_MCP_TOKEN` 예약) |
-| `[WIRE-ERRORS]`  | 실패 응답 형태(HTTP status vs 바디 ok=false) → 예외 매핑 |
+### 3. 화면 캡처 — capture-mcp (`drivers/mcp_client.py`)
 
-### 3. detection-MCP / VLM 배선 지점 (`src/remotectl/sense/detection_mcp.py`)
+- `capture` → `POST /capture {target, duration_sec}` 로 짧은 MP4 를 녹화한 뒤 **ffmpeg 로
+  마지막 프레임을 PNG 로 추출**해 `RawScreen.image_bytes` 에 싣는다.
+- **전제**: (1) 로컬에 `ffmpeg` 설치. (2) capture-mcp 가 반환하는 `file_path` 를 이 프로세스가
+  읽을 수 있어야 함(**공유 볼륨** 마운트). `CAPTURE_MCP_URL` 미설정 시 캡처 미가용.
 
-가정 계약: `POST /classify`.
+### 4. 화면 판정 — detection-mcp (`sense/detection_mcp.py`)
 
-| 표식 | 교체 내용 |
-|------|-----------|
-| `[WIRE-URL]`    | `DETECTION_MCP_URL` host:port/경로 |
-| `[WIRE-PATHS]`  | classify 오퍼레이션 method + path |
-| `[WIRE-REQ]`    | 이미지 전달 방식(URL vs base64), 프롬프트/모델 파라미터명 |
-| `[WIRE-RES]`    | 응답 필드명, kind 라벨 → `StateKind` 매핑, confidence 스케일 |
-| `[WIRE-PROMPT]` | 보정 프롬프트 본문 — **실측상 판정 정확도의 최대 레버**. `CALIBRATION_PROMPT` 에 채운다 |
-| `[WIRE-AUTH]`   | 인증 필요 여부(`DETECTION_MCP_TOKEN` 예약) |
+- `observe` → `POST /check/screen {scenario, image_base64, prefer_vision}`.
+- detection-mcp 는 상태 분류기가 아니라 **QA 판정기**이므로, 응답 `description`(VLM 서술)을
+  **로컬에서 합성**해 상태를 만든다: 키워드 규칙으로 `kind`/`app_id` 판별, 의미 토큰으로 안정적
+  `signature` 구성.
+- **튜닝 레버**([TUNE]): `_KIND_KEYWORDS`/`_APP_KEYWORDS` 어휘와 **detection-mcp 서버측 vision
+  프롬프트**(사내 리포). 서명 안정성/정확도는 여기서 올린다.
 
-> `grep -rn "WIRE" src/` 로 전 배선 지점을 한 번에 열거할 수 있다.
+> 남은 확인/후속: ir-mcp 코드셋 실측 매칭, capture 공유 볼륨/ffmpeg 배치, detection 상태 서명
+> 안정성 튜닝. 상태 분류 전용 baseline 이 마련되면 `description` 합성 대신 그 경로로 승격 가능.
 
 ---
 
