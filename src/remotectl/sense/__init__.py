@@ -19,10 +19,7 @@ from remotectl.sense.base import (
     SenseUnavailableError,
     normalize_signature,
 )
-from remotectl.sense.detection_mcp import (
-    CALIBRATION_PROMPT,
-    DetectionMcpScreenSense,
-)
+from remotectl.sense.detection_mcp import DetectionMcpScreenSense
 from remotectl.sense.mock import MockScreenSense
 
 __all__ = [
@@ -35,5 +32,4 @@ __all__ = [
     # 구현체
     "MockScreenSense",
     "DetectionMcpScreenSense",
-    "CALIBRATION_PROMPT",
 ]
