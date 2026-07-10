@@ -40,10 +40,14 @@ htmlcov/
 .env.local
 *.local
 
-# 런타임 산출물 (맵 저장, 스크린샷 등)
+# 런타임 산출물 (맵 저장, 스크린샷, 키↔화면 DB 등)
 *.map.json
 navmap_store/
 data/*.json
+data/*.db
+*.db
+*.sqlite
+*.sqlite3
 
 # IDE / OS
 .idea/

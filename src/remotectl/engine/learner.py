@@ -61,6 +61,16 @@ from remotectl.navmap import NavGraph
 # __init__ 에서 MockScreenSense/DetectionMcpScreenSense(구체 구현체)를 재노출·즉시 임포트하므로,
 # 그쪽을 임포트하면 학습기가 구현체에 전이적으로 결합된다(아키텍처 임포트 검사 위반).
 from remotectl.sense.base import ScreenSense, ScreenSenseError
+from remotectl.engine.hooks import (
+    ErrorAnalyzer,
+    ErrorContext,
+    ErrorPhase,
+    NoRetryAnalyzer,
+    NullObserver,
+    Remediation,
+    StepObserver,
+    StepRecord,
+)
 
 __all__ = ["Learner", "DEFAULT_BUTTON_SET"]
 
@@ -110,10 +120,18 @@ class Learner:
         graph: NavGraph,
         button_set: Optional[list[KeyPress]] = None,
         settle_ms: int = 400,
+        observer: Optional[StepObserver] = None,
+        analyzer: Optional[ErrorAnalyzer] = None,
     ) -> None:
         self.driver = driver
         self.sense = sense
         self.graph = graph
+        # 관찰자(키↔화면 동시 기록: 별도 DB) / 오류 분석기(자가치유 정책). 미주입 시 무해한 기본.
+        self.observer: StepObserver = observer or NullObserver()
+        self.analyzer: ErrorAnalyzer = analyzer or NoRetryAnalyzer()
+        # 자가치유로 포기한 (state, key) — 재선택 방지(무한 재시도 차단).
+        self._skipped: set[tuple[str, str]] = set()
+        self._session_id: str = ""
         # 커버리지 키 집합(=탐색 대상) 결정. 우선순위:
         #   1) 명시 button_set(호출자 지정)
         #   2) 드라이버가 보고한 실 리모컨 키(available_keys) — 안전 제외키(POWER 등) 제거
@@ -158,6 +176,8 @@ class Learner:
         (다만 어떤 관찰도 못 한 완전 실패는 그대로 예외를 전파해 상위가 인지하게 한다.)
         """
         sid = session_id or f"learn-{int(time.time() * 1000)}"
+        self._session_id = sid
+        self._skipped.clear()  # 세션마다 초기화 → 다음 라운드에서 재치유 기회.
         started = _utcnow()
         steps_taken = 0
         stop_reason: Optional[str] = None
@@ -189,34 +209,26 @@ class Learner:
                 stop_reason = "미탐색 간선 없음(맵 포화)"
                 break
 
-            try:
-                self.driver.press(key)
-                if self.settle_ms:
-                    self.driver.settle(self.settle_ms)
-                result = self._capture_and_observe()
-            except DriverUnavailableError as exc:
-                stop_reason = f"드라이버 도달 불가: {exc}"
-                break
-            except (PressError, CaptureError, RemoteDriverError) as exc:
-                # 개별 입력/캡처 실패는 안전 종료 사유로 기록(엔진 크래시 방지).
-                stop_reason = f"드라이버 오류: {exc}"
-                break
-            except ScreenSenseError as exc:
-                stop_reason = f"센스 오류: {exc}"
-                break
-
+            # press → observe (오류 자가치유 포함). 결과: (result, reconciled, stop_reason).
+            result, reconciled, step_stop = self._attempt_step(current, key)
             steps_taken += 1
+            if step_stop is not None:
+                stop_reason = step_stop
+                break
+            if result is None:
+                # 자가치유로도 판정 실패 → 이 (state,key) 포기(재선택 방지) 후 계속.
+                self._skipped.add((current.id, key.token))
+                continue
 
             # SenseResult → 맵 상태 확정(upsert; 같은 화면 자동 수렴).
             to_state = resolve_state(result, self.graph)
             # 전이 기록: (current, key) -> to_state. self-loop(무전이)도 유효한 관측이다.
             self.graph.observe_transition(current, key, to_state)
+            # 동시 기록: 키이벤트↔화면 매핑 + LLM 분석을 별도 DB(관찰자)에 남긴다.
+            self._record_step(current, key, to_state, result, reconciled)
 
             # 현재 상태 갱신 후 다음 스텝.
             current = to_state
-
-            # 진행이 막힌 경우(현재도 프런티어도 아님) 대비: _select_key 가 이미
-            # 프런티어 이동/포화를 처리하므로 여기서는 별도 복귀 로직이 필요없다.
 
         else:
             # while 정상 소진(break 없이 예산 도달).
@@ -242,8 +254,8 @@ class Learner:
 
         반환 None 은 상위 루프의 종료 조건이 된다.
         """
-        # 1) 현재 상태의 미탐색 간선.
-        local_unexplored = self.graph.unexplored(current_state_id, self.button_set)
+        # 1) 현재 상태의 미탐색 간선(자가치유로 포기한 키는 제외).
+        local_unexplored = self._effective_unexplored(current_state_id)
         if local_unexplored:
             return self._first_by_policy(local_unexplored)
 
@@ -285,11 +297,19 @@ class Learner:
         return min(candidates, key=lambda kp: order.get(kp.token, len(order)))
 
     def _has_any_frontier(self) -> bool:
-        """맵의 어떤 알려진 상태에라도 미탐색 간선이 남아있는지."""
+        """맵의 어떤 알려진 상태에라도 (포기 제외) 미탐색 간선이 남아있는지."""
         for state_id in self.graph.navmap.states:
-            if self.graph.unexplored(state_id, self.button_set):
+            if self._effective_unexplored(state_id):
                 return True
         return False
+
+    def _effective_unexplored(self, state_id: str) -> list[KeyPress]:
+        """미탐색 간선에서 자가치유로 포기한 (state,key) 를 제외한 목록."""
+        return [
+            kp
+            for kp in self.graph.unexplored(state_id, self.button_set)
+            if (state_id, kp.token) not in self._skipped
+        ]
 
     def _observe_current(self) -> ScreenState:
         """현재 화면을 캡처·판정·확정한다(초기 관찰용; 전이 기록 없음)."""
@@ -303,6 +323,144 @@ class Learner:
         raw: RawScreen = self.driver.capture()
         return self.sense.observe(raw)
 
+    # --- 자가치유 스텝 실행 ------------------------------------------------ #
+
+    #: 분석기 버그로 인한 무한 재시도를 막는 스텝당 하드 상한.
+    _HEAL_CAP = 10
+
+    def _attempt_step(self, current: ScreenState, key: KeyPress):
+        """press → observe 를 오류 자가치유와 함께 1스텝 수행.
+
+        하드 오류(전송/캡처/판정 예외)는 분석기 결정에 따라 RETRY(재전송)/REOBSERVE(재판정)/
+        SKIP(포기)/STOP(종료). 소프트 이슈(저신뢰/비결정 전이)는 VLM 재판정으로 개선을 시도하되
+        결과는 항상 채택한다(읽기를 버리지 않음).
+
+        Returns:
+            (result|None, reconciled: bool, stop_reason|None).
+            result None = SKIP(오류 기록됨), stop_reason 있으면 학습 종료.
+        """
+        result = None
+        reconciled = False
+        attempt = 0
+        # 1) 전송+판정(하드 오류 치유). RETRY 는 재전송, REOBSERVE 는 재판정만.
+        need_press = True
+        while result is None and attempt < self._HEAL_CAP:
+            try:
+                if need_press:
+                    self.driver.press(key)
+                if self.settle_ms:
+                    self.driver.settle(self.settle_ms)
+                result = self._capture_and_observe()
+            except DriverUnavailableError as exc:
+                phase = ErrorPhase.PRESS if need_press else ErrorPhase.CAPTURE
+                decision = self._heal(phase, current, key, f"도달 불가: {exc}", attempt)
+                if decision == Remediation.STOP:
+                    return None, reconciled, f"드라이버 도달 불가: {exc}"
+                if decision == Remediation.SKIP:
+                    return None, reconciled, None
+                reconciled = True
+                need_press = decision == Remediation.RETRY
+                attempt += 1
+            except (PressError, RemoteDriverError) as exc:
+                decision = self._heal(ErrorPhase.PRESS, current, key, f"전송 오류: {exc}", attempt)
+                if decision == Remediation.STOP:
+                    return None, reconciled, f"드라이버 오류: {exc}"
+                if decision == Remediation.SKIP:
+                    return None, reconciled, None
+                reconciled = True
+                need_press = decision == Remediation.RETRY
+                attempt += 1
+            except CaptureError as exc:
+                decision = self._heal(ErrorPhase.CAPTURE, current, key, f"캡처 오류: {exc}", attempt)
+                if decision == Remediation.STOP:
+                    return None, reconciled, f"캡처 오류: {exc}"
+                if decision == Remediation.SKIP:
+                    return None, reconciled, None
+                reconciled = True
+                need_press = decision == Remediation.RETRY
+                attempt += 1
+            except ScreenSenseError as exc:
+                decision = self._heal(ErrorPhase.OBSERVE, current, key, f"판정 오류: {exc}", attempt)
+                if decision == Remediation.STOP:
+                    return None, reconciled, f"센스 오류: {exc}"
+                if decision == Remediation.SKIP:
+                    return None, reconciled, None
+                reconciled = True
+                need_press = decision == Remediation.RETRY
+                attempt += 1
+
+        if result is None:  # 하드 상한 도달
+            return None, reconciled, None
+
+        # 2) 소프트 이슈(저신뢰/비결정) — VLM 재판정으로 개선 시도, 결과는 항상 채택.
+        soft_attempt = 0
+        while soft_attempt < self._HEAL_CAP:
+            issue = self._soft_issue(current, key, result)
+            if issue is None:
+                break
+            decision = self._heal(
+                issue, current, key, f"{issue.value}", soft_attempt, result.state.confidence
+            )
+            if decision != Remediation.REOBSERVE:
+                break  # 소프트 이슈는 포기해도 현재 읽기를 채택.
+            reconciled = True
+            soft_attempt += 1
+            try:
+                if self.settle_ms:
+                    self.driver.settle(self.settle_ms)
+                candidate = self._capture_and_observe()
+            except ScreenSenseError:
+                break  # 재판정 실패 → 현재 읽기 유지.
+            # 더 신뢰도 높은 읽기면 채택.
+            if candidate.state.confidence >= result.state.confidence:
+                result = candidate
+
+        return result, reconciled, None
+
+    def _heal(self, phase, current, key, message, attempt, confidence=None):
+        """오류 분석기에 결정을 묻고, 관찰자에 오류+결정을 기록한 뒤 행동을 돌려준다."""
+        ctx = ErrorContext(
+            phase=phase,
+            from_state_id=current.id,
+            key_token=key.token,
+            message=message,
+            attempt=attempt,
+            confidence=confidence,
+        )
+        decision = self.analyzer.analyze(ctx)
+        self.observer.on_error(ctx, decision)
+        return decision.action
+
+    def _soft_issue(self, current: ScreenState, key: KeyPress, result):
+        """현재 읽기의 소프트 이슈(저신뢰/비결정 전이)를 판별. 없으면 None."""
+        if result.low_confidence:
+            return ErrorPhase.LOW_CONFIDENCE
+        # 과거 기록과 다른 도착 상태면 비결정(flaky) — 재판정으로 확정 시도.
+        prior = next(
+            (t.to_state_id for t in self.graph.outgoing(current.id)
+             if t.key.token == key.token),
+            None,
+        )
+        if prior is not None and prior != result.state.id:
+            return ErrorPhase.INCONSISTENT
+        return None
+
+    def _record_step(self, from_state, key, to_state, result, reconciled: bool) -> None:
+        """정상 스텝을 관찰자(별도 DB)에 기록 — 키이벤트↔화면 매핑 + LLM 분석."""
+        self.observer.on_step(StepRecord(
+            session_id=self._session_id,
+            from_state_id=from_state.id,
+            from_signature=from_state.signature,
+            key_token=key.token,
+            to_state_id=to_state.id,
+            to_signature=to_state.signature,
+            to_kind=to_state.kind.value,
+            to_app_id=to_state.app_id,
+            analysis=to_state.label,
+            confidence=to_state.confidence,
+            reconciled=reconciled,
+        ))
+
     def _coverage(self) -> float:
         """현재 맵의 커버리지 비율(M4). NavGraph 에 위임."""
         return self.graph.coverage(self.button_set)
@@ -311,7 +469,7 @@ class Learner:
         """모든 알려진 상태에 걸쳐 남은 미탐색 (state,button) 간선 총수."""
         total = 0
         for state_id in self.graph.navmap.states:
-            total += len(self.graph.unexplored(state_id, self.button_set))
+            total += len(self._effective_unexplored(state_id))
         return total
 
     def _summarize(

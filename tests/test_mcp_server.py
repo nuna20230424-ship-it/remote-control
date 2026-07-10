@@ -50,8 +50,12 @@ def test_find_path_unreachable_normalized():
 
 
 def test_build_server_registers_all_tools():
-    """FastMCP 서버 조립 시 4개 도구가 모두 등록된다(mcp 설치 시에만)."""
+    """FastMCP 서버 조립 시 도구가 모두 등록된다(mcp 설치 시에만)."""
     pytest.importorskip("mcp")
     server = mcp_server.build_server()
     assert server is not None
-    assert len(mcp_server.TOOLS) == 4
+    names = {fn.__name__ for fn in mcp_server.TOOLS}
+    assert {
+        "remote_learn", "remote_inspect_map", "remote_find_path",
+        "remote_run_goal", "remote_autolearn", "remote_keyscreen",
+    } <= names

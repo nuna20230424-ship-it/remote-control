@@ -233,6 +233,41 @@ DETECTION_MCP_MODEL=qwen2.5vl:7b
 
 ---
 
+## 자동 커버리지 학습 · 키↔화면 DB · 자가치유
+
+리모컨 키와 화면을 **한 패스에서 동시에** 학습하고, LLM(VLM) 분석과 함께 **별도 DB**에 쌓으며,
+오류는 자가치유하고, **목표 커버리지까지 자동 반복**하는 시스템.
+
+- **동시 학습** — 학습 스텝(`press→settle→capture→observe→resolve→observe_transition`)마다
+  `(from_state, key)→to_state` 매핑과 화면 LLM 분석을 함께 기록한다.
+- **별도 DB (SQLite)** — `store.KeyScreenStore`. `screens`(화면별 LLM 분석) · `key_screen_map`
+  (키이벤트↔화면 + 관측수 + reconciled) · `error_log`(오류·복구 이력). 경로 `REMOTECTL_KEYSCREEN_DB`
+  (기본 `./data/keyscreen.db`). navmap(JSON)과 분리.
+- **오류 자가치유** — `reconcile.PolicyErrorAnalyzer` + Learner 훅. 전송 실패→재전송, 판정 실패/
+  저신뢰/비결정 전이→**detection-mcp VLM 재판정(REOBSERVE)**으로 정확히 재매핑, 소진 시 해당
+  (state,key)를 건너뛰고 오류 기록(무한 재시도 방지). `REMOTECTL_RECONCILE_MAX_ATTEMPTS`(기본 2).
+- **목표 커버리지 자동 반복** — `autolearn.AutoLearner`. 목표 도달 / K라운드 무진전 / 최대 라운드로
+  종료하고, **미커버 키·상태를 리포트로 노출**한다(100% 는 미발견 상태·도달불가 키 때문에 보장되지
+  않으므로 `target_coverage` 를 받는다 — silent 미달 방지).
+
+```bash
+# CLI: 목표 0.95 까지 자동 반복(도달 0, 미달 3 종료코드)
+remotectl autolearn --target 0.95 --steps 200 --max-rounds 20
+# 키↔화면 매핑 DB 조회(통계·화면·매핑)
+remotectl keyscreen
+```
+
+| 인터페이스 | 자동 학습 | DB 조회 |
+|---|---|---|
+| REST | `POST /autolearn {target_coverage, step_budget, max_rounds}` | `GET /keyscreen` |
+| CLI  | `remotectl autolearn --target …` | `remotectl keyscreen` |
+| MCP  | `remote_autolearn(target_coverage, …)` | `remote_keyscreen()` |
+
+> 개발/CI 는 mock 백엔드로 전 파이프라인이 완결된다(학습→DB 기록→자가치유→자동 반복). 실기기에서는
+> §4 배선 + detection 서명 안정성이 커버리지 신뢰의 전제다.
+
+---
+
 ## 대시보드 사용법
 
 `remotectl serve` 후 브라우저로 `http://127.0.0.1:8099/` 접속. 외부 CDN 의존이 없는 자족 SPA(바닐라 JS + `fetch`)이며 사내망/오프라인에서도 뜬다.

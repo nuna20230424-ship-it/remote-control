@@ -56,6 +56,7 @@ class Settings(BaseModel):
     remote_mcp_url: str = ""
     detection_mcp_url: str = ""
     map_store_path: str = "./data/navmap.json"
+    keyscreen_db_path: str = "./data/keyscreen.db"  # 키이벤트↔화면 매핑 별도 SQLite DB.
     settle_ms: int = Field(default=400, ge=0)
     learn_step_budget: int = Field(default=200, ge=0)
     exec_replan_budget: int = Field(default=5, ge=0)
@@ -115,6 +116,7 @@ def load_settings() -> Settings:
         remote_mcp_url=os.environ.get("REMOTE_MCP_URL", ""),
         detection_mcp_url=os.environ.get("DETECTION_MCP_URL", ""),
         map_store_path=os.environ.get("REMOTECTL_MAP_STORE_PATH", "./data/navmap.json"),
+        keyscreen_db_path=os.environ.get("REMOTECTL_KEYSCREEN_DB", "./data/keyscreen.db"),
         settle_ms=_env_int("REMOTECTL_SETTLE_MS", 400),
         learn_step_budget=_env_int("REMOTECTL_LEARN_STEP_BUDGET", 200),
         exec_replan_budget=_env_int("REMOTECTL_EXEC_REPLAN_BUDGET", 5),
