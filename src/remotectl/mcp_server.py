@@ -41,6 +41,8 @@ __all__ = [
     "remote_inspect_map",
     "remote_find_path",
     "remote_run_goal",
+    "remote_autolearn",
+    "remote_keyscreen",
     "TOOLS",
     "build_server",
     "main",
@@ -114,8 +116,66 @@ def remote_run_goal(text: str) -> dict[str, Any]:
     return result.model_dump(mode="json")
 
 
+def remote_autolearn(
+    target_coverage: float = 1.0,
+    step_budget: int = 200,
+    max_rounds: int = 20,
+    no_progress_rounds: int = 2,
+) -> dict[str, Any]:
+    """목표 커버리지까지 학습을 자동 반복하고 리포트를 반환한다(맵/DB 저장 포함).
+
+    100% 는 미발견 상태·도달불가 키 때문에 항상 보장되지 않으므로 target_coverage 를 받고,
+    도달/정체/상한 사유(stop_cause)와 미커버 키/상태를 리포트로 노출한다. 매 라운드의
+    키↔화면 매핑은 별도 DB(keyscreen)에 누적된다.
+
+    Args:
+        target_coverage: 목표 커버리지(0~1).
+        step_budget: 라운드당 최대 스텝.
+        max_rounds: 최대 라운드(안전 상한).
+        no_progress_rounds: 연속 무진전 종료 임계.
+    """
+    from remotectl.autolearn import AutoLearner
+
+    s, driver, sense, graph = _ctx()
+    store = deps.make_store(s)
+    learner = Learner(
+        driver, sense, graph, settle_ms=s.settle_ms,
+        observer=store, analyzer=deps.make_analyzer(s),
+    )
+    try:
+        report = AutoLearner(learner).run(
+            target_coverage=target_coverage, step_budget=step_budget,
+            max_rounds=max_rounds, no_progress_rounds=no_progress_rounds,
+        )
+        graph.save(s.map_store_path)
+        return report.to_dict()
+    finally:
+        store.close()
+
+
+def remote_keyscreen() -> dict[str, Any]:
+    """키이벤트↔화면 매핑 별도 DB 조회(통계 + 화면 LLM 분석 + 매핑)."""
+    s = load_settings()
+    store = deps.make_store(s)
+    try:
+        return {
+            "stats": store.stats(),
+            "screens": store.screens(),
+            "mappings": store.mappings(),
+        }
+    finally:
+        store.close()
+
+
 # 공개 도구 목록(테스트/문서/등록에서 단일 출처로 참조).
-TOOLS = [remote_learn, remote_inspect_map, remote_find_path, remote_run_goal]
+TOOLS = [
+    remote_learn,
+    remote_inspect_map,
+    remote_find_path,
+    remote_run_goal,
+    remote_autolearn,
+    remote_keyscreen,
+]
 
 
 def build_server():

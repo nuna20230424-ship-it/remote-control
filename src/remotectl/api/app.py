@@ -37,6 +37,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
+from remotectl.autolearn import AutoLearner
 from remotectl.config import Settings, load_settings
 from remotectl.engine.executor import Executor
 from remotectl.engine.learner import Learner
@@ -71,6 +72,15 @@ class GoalRequest(BaseModel):
     """POST /goal 요청 바디."""
 
     text: str = Field(min_length=1, max_length=500, description="자연어 목표(예: '넷플릭스 켜줘').")
+
+
+class AutolearnRequest(BaseModel):
+    """POST /autolearn 요청 바디(목표 커버리지까지 자동 반복)."""
+
+    target_coverage: float = Field(default=1.0, ge=0.0, le=1.0, description="목표 커버리지(0~1).")
+    step_budget: int = Field(default=200, ge=0, description="라운드당 최대 스텝.")
+    max_rounds: int = Field(default=20, ge=1, le=200, description="최대 라운드(안전 상한).")
+    no_progress_rounds: int = Field(default=2, ge=1, description="연속 무진전 종료 임계.")
 
 
 # 대시보드 정적 파일 위치(이 모듈 옆의 static/index.html).
@@ -191,6 +201,9 @@ def create_app(settings: Optional[Settings] = None) -> "FastAPI":
     driver = deps.make_driver(s)
     sense = deps.make_sense(s)
     graph = deps.load_graph(s)
+    # 키↔화면 동시 기록(별도 DB) + 오류 자가치유 정책.
+    store = deps.make_store(s)
+    analyzer = deps.make_analyzer(s)
 
     app = FastAPI(
         title="STB 리모컨 학습 에이전트",
@@ -202,6 +215,7 @@ def create_app(settings: Optional[Settings] = None) -> "FastAPI":
     app.state.driver = driver
     app.state.sense = sense
     app.state.graph = graph
+    app.state.store = store
 
     # --- 내부: 맵 저장(실패해도 요청은 성공 처리) ------------------------- #
 
@@ -240,7 +254,9 @@ def create_app(settings: Optional[Settings] = None) -> "FastAPI":
     def learn(req: LearnRequest) -> JSONResponse:
         """UC-1 탐색 학습 세션을 실행하고 LearningSummary 를 반환한다(맵 저장 포함)."""
         budget = req.step_budget if req.step_budget is not None else s.learn_step_budget
-        learner = Learner(driver, sense, graph, settle_ms=s.settle_ms)
+        learner = Learner(
+            driver, sense, graph, settle_ms=s.settle_ms, observer=store, analyzer=analyzer
+        )
         try:
             summary = learner.learn(step_budget=budget, coverage_target=req.coverage_target)
         except Exception as exc:  # noqa: BLE001 — 초기 관찰 실패 등은 502 로 정규화.
@@ -275,6 +291,39 @@ def create_app(settings: Optional[Settings] = None) -> "FastAPI":
         result = executor.run_goal(req.text)
         _persist()
         return JSONResponse(result.model_dump(mode="json"))
+
+    @app.post("/autolearn")
+    def autolearn(req: AutolearnRequest) -> JSONResponse:
+        """목표 커버리지까지 학습을 자동 반복하고 리포트를 반환한다(맵/DB 저장 포함).
+
+        도달/정체/상한 사유와 미커버 키·상태를 리포트로 노출한다(100% 미달을 숨기지 않음).
+        """
+        learner = Learner(
+            driver, sense, graph, settle_ms=s.settle_ms, observer=store, analyzer=analyzer
+        )
+        try:
+            report = AutoLearner(learner).run(
+                target_coverage=req.target_coverage,
+                step_budget=req.step_budget,
+                max_rounds=req.max_rounds,
+                no_progress_rounds=req.no_progress_rounds,
+            )
+        except Exception as exc:  # noqa: BLE001 — 초기 관찰 실패 등은 502 로 정규화.
+            raise HTTPException(status_code=502, detail=f"자동 학습 실패: {exc}") from exc
+        _persist()
+        return JSONResponse(report.to_dict())
+
+    @app.get("/keyscreen")
+    def keyscreen() -> JSONResponse:
+        """키이벤트↔화면 매핑 DB 조회(통계 + 화면 분석 + 매핑)."""
+        if not hasattr(store, "stats"):
+            return JSONResponse({"available": False})
+        return JSONResponse({
+            "available": True,
+            "stats": store.stats(),
+            "screens": store.screens(),
+            "mappings": store.mappings(),
+        })
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard() -> HTMLResponse:
@@ -336,13 +385,18 @@ def _cmd_learn(s: Settings, args: argparse.Namespace) -> int:
     sense = deps.make_sense(s)
     graph = deps.load_graph(s)
     budget = args.steps if args.steps is not None else s.learn_step_budget
-    learner = Learner(driver, sense, graph, settle_ms=s.settle_ms)
+    store = deps.make_store(s)
+    learner = Learner(
+        driver, sense, graph, settle_ms=s.settle_ms,
+        observer=store, analyzer=deps.make_analyzer(s),
+    )
     try:
         summary = learner.learn(step_budget=budget, coverage_target=args.coverage)
     except Exception as exc:  # noqa: BLE001
         print(f"학습 실패: {exc}", file=sys.stderr)
         return 1
     finally:
+        _safe_close(store)
         _safe_close(driver)
         _safe_close(sense)
     try:
@@ -399,6 +453,66 @@ def _cmd_goal(s: Settings, args: argparse.Namespace) -> int:
     return 0 if result.succeeded else 2
 
 
+def _cmd_autolearn(s: Settings, args: argparse.Namespace) -> int:
+    """CLI autolearn: 목표 커버리지까지 자동 반복 학습 후 리포트를 출력한다."""
+    from remotectl.autolearn import AutoLearner
+
+    driver = deps.make_driver(s)
+    sense = deps.make_sense(s)
+    graph = deps.load_graph(s)
+    store = deps.make_store(s)
+    learner = Learner(
+        driver, sense, graph, settle_ms=s.settle_ms,
+        observer=store, analyzer=deps.make_analyzer(s),
+    )
+    try:
+        report = AutoLearner(learner).run(
+            target_coverage=args.target, step_budget=args.steps,
+            max_rounds=args.max_rounds, no_progress_rounds=args.no_progress,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"자동 학습 실패: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        _safe_close(store)
+        _safe_close(driver)
+        _safe_close(sense)
+    try:
+        graph.save(s.map_store_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"경고: 맵 저장 실패({s.map_store_path}): {exc}", file=sys.stderr)
+    print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    verdict = "목표 도달" if report.reached else f"미달({report.stop_cause})"
+    print(
+        f"\n자동 학습: {verdict} · 커버리지 {report.final_coverage:.3f}/{report.target_coverage:.3f} "
+        f"· {report.rounds}라운드 · 미커버 키 {len(report.uncovered_key_tokens)}종",
+        file=sys.stderr,
+    )
+    # 목표 도달이면 0, 미달이면 3(자동화 스크립트가 게이트로 쓰기 좋게).
+    return 0 if report.reached else 3
+
+
+def _cmd_keyscreen(s: Settings, args: argparse.Namespace) -> int:
+    """CLI keyscreen: 키이벤트↔화면 매핑 DB(통계/화면/매핑)를 출력한다."""
+    store = deps.make_store(s)
+    try:
+        payload = {
+            "stats": store.stats(),
+            "screens": store.screens(),
+            "mappings": store.mappings(),
+        }
+    finally:
+        _safe_close(store)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    st = payload["stats"]
+    print(
+        f"\nkeyscreen DB({st['db_path']}): 화면 {st['screens']} · 매핑 {st['mappings']} "
+        f"· 오류 {st['errors']} · 재조정 {st['reconciled']}",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def _cmd_serve(s: Settings, args: argparse.Namespace) -> int:
     """CLI serve: uvicorn 으로 REST + 대시보드를 기동한다(FastAPI/uvicorn 필요)."""
     try:
@@ -442,6 +556,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_goal = sub.add_parser("goal", help="UC-3 자연어 목표 실행")
     p_goal.add_argument("text", help='자연어 목표 (예: "넷플릭스 켜줘")')
 
+    p_auto = sub.add_parser("autolearn", help="목표 커버리지까지 자동 반복 학습")
+    p_auto.add_argument("--target", type=float, default=1.0, help="목표 커버리지(0~1, 기본 1.0)")
+    p_auto.add_argument("--steps", type=int, default=200, help="라운드당 최대 스텝(기본 200)")
+    p_auto.add_argument("--max-rounds", dest="max_rounds", type=int, default=20, help="최대 라운드")
+    p_auto.add_argument(
+        "--no-progress", dest="no_progress", type=int, default=2, help="연속 무진전 종료 임계"
+    )
+
+    sub.add_parser("keyscreen", help="키이벤트↔화면 매핑 DB 조회(통계/화면/매핑)")
+
     p_serve = sub.add_parser("serve", help="REST API + 대시보드 서빙(uvicorn)")
     p_serve.add_argument("--host", default="127.0.0.1", help="바인드 호스트")
     p_serve.add_argument("--port", type=int, default=8099, help="포트(기본 8099)")
@@ -478,6 +602,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "learn": _cmd_learn,
         "inspect": _cmd_inspect,
         "goal": _cmd_goal,
+        "autolearn": _cmd_autolearn,
+        "keyscreen": _cmd_keyscreen,
         "serve": _cmd_serve,
     }
     handler = dispatch.get(args.command)

@@ -29,10 +29,11 @@ from pathlib import Path
 
 from remotectl.config import Settings
 from remotectl.drivers.base import RemoteDriver
+from remotectl.engine.hooks import ErrorAnalyzer, StepObserver
 from remotectl.navmap import NavGraph
 from remotectl.sense.base import ScreenSense
 
-__all__ = ["make_driver", "make_sense", "load_graph"]
+__all__ = ["make_driver", "make_sense", "load_graph", "make_store", "make_analyzer"]
 
 
 def make_driver(s: Settings) -> RemoteDriver:
@@ -129,3 +130,21 @@ def load_graph(s: Settings) -> NavGraph:
         # 미학습 상태: 빈 그래프로 시작(학습 후 save 로 이 경로에 생성됨).
         return NavGraph()
     return NavGraph.load(path)
+
+
+def make_store(s: Settings) -> StepObserver:
+    """키이벤트↔화면 매핑 별도 DB(SQLite) 관찰자를 생성한다(동시 기록용).
+
+    Settings.keyscreen_db_path 에 SQLite 파일을 두고, 학습 루프에 관찰자로 주입되어
+    매 스텝의 (from,key)→to 매핑 + LLM 화면 분석을 누적한다.
+    """
+    from remotectl.store import KeyScreenStore
+
+    return KeyScreenStore.from_env(path=s.keyscreen_db_path)
+
+
+def make_analyzer(s: Settings) -> ErrorAnalyzer:
+    """오류 자가치유 정책 분석기를 생성한다(REOBSERVE 시 detection-mcp VLM 재판정)."""
+    from remotectl.reconcile import PolicyErrorAnalyzer
+
+    return PolicyErrorAnalyzer.from_env()
