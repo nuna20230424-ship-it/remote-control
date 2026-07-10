@@ -300,6 +300,37 @@ class RemoteMcpClient(RemoteDriver):
             ready=ready,
         )
 
+    def available_keys(self) -> list[KeyPress]:
+        """ir-mcp GET /codesets/{codeset} 로 대상 코드셋의 실제 키 전체를 KeyPress 로 보고한다.
+
+        커버리지 정본이 "고정 7키"가 아니라 **이 단말 리모컨이 실제로 갖는 키 집합**이 되게 한다.
+        ir-mcp 키명을 키맵 역매핑으로 canonical Button 에 대응시키고, 매핑에 없는 키(NETFLIX 등
+        앱/특수키)는 APP_SHORTCUT 로 표현한다. 도달 불가/미확정이면 빈 리스트(학습기가 폴백).
+        """
+        try:
+            resp = self._request(
+                self._client, "GET", f"/codesets/{self._codeset}"
+            )
+        except DriverUnavailableError:
+            return []
+        if resp.status_code >= 400:
+            return []
+        try:
+            keys = resp.json().get("keys") or []
+        except Exception:  # noqa: BLE001
+            return []
+
+        inverse = {name: button for button, name in self._keymap.items()}
+        out: list[KeyPress] = []
+        for name in keys:
+            button = inverse.get(name)
+            if button is not None:
+                out.append(KeyPress(button=button))
+            else:
+                # 키맵에 없는 키(앱 단축/특수키)는 앱 단축으로 표현 → _map_key 가 대문자 키명으로 송신.
+                out.append(KeyPress(button=Button.APP_SHORTCUT, app_shortcut=name.lower()))
+        return out
+
     def close(self) -> None:
         if self._owns_client:
             self._client.close()

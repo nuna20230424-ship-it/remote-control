@@ -413,6 +413,60 @@ class NavGraph:
 
         return len(explored_pairs) / denom
 
+    def coverage_report(self, button_set: list[KeyPress]) -> dict:
+        """커버리지를 키별·상태별로 분해한 리포트.
+
+        `coverage()` 가 단일 비율이라면, 이건 "어느 키가 어느 상태에서 아직 안 눌렸는지"를
+        노출한다. 100% 가 **발견된 상태 기준**임을 감추지 않기 위한 것으로, 학습 요약과
+        운영자 판단에 쓰인다(silent 100% 방지).
+
+        Returns:
+            dict: {
+              overall: 전체 비율(=coverage),
+              state_count, key_count,
+              per_key: {token: {tried_states, ratio}},   # 각 키가 몇 개 상태에서 시도됐나
+              uncovered: [{state_id, untried_tokens}],    # 상태별 미시도 키
+            }
+        """
+        states = list(self._navmap.states)
+        unique_tokens: list[str] = []
+        seen: set[str] = set()
+        for kp in button_set:
+            if kp.token not in seen:
+                seen.add(kp.token)
+                unique_tokens.append(kp.token)
+
+        state_set = set(states)
+        explored: dict[str, set[str]] = {}
+        for t in self._navmap.transitions:
+            tok = t.key.token
+            if t.from_state_id in state_set and tok in seen:
+                explored.setdefault(tok, set()).add(t.from_state_id)
+
+        n_states = len(states)
+        per_key = {
+            tok: {
+                "tried_states": len(explored.get(tok, ())),
+                "ratio": (len(explored.get(tok, ())) / n_states) if n_states else 0.0,
+            }
+            for tok in unique_tokens
+        }
+        uncovered = []
+        for sid in states:
+            untried = [tok for tok in unique_tokens if sid not in explored.get(tok, set())]
+            if untried:
+                uncovered.append({"state_id": sid, "untried_tokens": untried})
+
+        denom = n_states * len(unique_tokens)
+        covered_pairs = sum(len(v) for v in explored.values())
+        return {
+            "overall": (covered_pairs / denom) if denom else 0.0,
+            "state_count": n_states,
+            "key_count": len(unique_tokens),
+            "per_key": per_key,
+            "uncovered": uncovered,
+        }
+
     # ------------------------------------------------------------------ #
     # 영속화
     # ------------------------------------------------------------------ #
