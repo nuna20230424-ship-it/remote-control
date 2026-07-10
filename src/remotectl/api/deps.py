@@ -144,7 +144,17 @@ def make_store(s: Settings) -> StepObserver:
 
 
 def make_analyzer(s: Settings) -> ErrorAnalyzer:
-    """오류 자가치유 정책 분석기를 생성한다(REOBSERVE 시 detection-mcp VLM 재판정)."""
+    """오류 자가치유 분석기를 생성한다.
+
+    - sense=detection: :class:`VlmErrorAnalyzer` — LLM(VLM) 이상/저신뢰 판정을 오류로 인식해
+      재판정(REOBSERVE)으로 정상 복구를 시도한다("LLM 이 판단해 오류 인식 → 수정 후 재시도").
+    - sense=mock: :class:`PolicyErrorAnalyzer` — VLM 판정이 없으므로 규칙 기반.
+    """
+    if s.sense_backend == "detection":
+        from remotectl.reconcile import VlmErrorAnalyzer
+
+        return VlmErrorAnalyzer.from_env()
+
     from remotectl.reconcile import PolicyErrorAnalyzer
 
     return PolicyErrorAnalyzer.from_env()

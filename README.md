@@ -243,9 +243,13 @@ DETECTION_MCP_MODEL=qwen2.5vl:7b
 - **별도 DB (SQLite)** — `store.KeyScreenStore`. `screens`(화면별 LLM 분석) · `key_screen_map`
   (키이벤트↔화면 + 관측수 + reconciled) · `error_log`(오류·복구 이력). 경로 `REMOTECTL_KEYSCREEN_DB`
   (기본 `./data/keyscreen.db`). navmap(JSON)과 분리.
-- **오류 자가치유** — `reconcile.PolicyErrorAnalyzer` + Learner 훅. 전송 실패→재전송, 판정 실패/
-  저신뢰/비결정 전이→**detection-mcp VLM 재판정(REOBSERVE)**으로 정확히 재매핑, 소진 시 해당
-  (state,key)를 건너뛰고 오류 기록(무한 재시도 방지). `REMOTECTL_RECONCILE_MAX_ATTEMPTS`(기본 2).
+- **오류 자가치유 (LLM 판정 기반)** — Learner 훅 + `reconcile.*ErrorAnalyzer`. **LLM(detection-mcp)이
+  화면을 이상(`verdict=anomaly`)/저신뢰로 판정하면 이를 "오류"로 인식**하고, **VLM 재판정(REOBSERVE)으로
+  정상 복구를 시도**한다(정상 판정이 이상 판정을 이겨 채택 — "수정 후 재시도 → 정상 학습"). 전송 실패→재전송,
+  소진 시 해당 (state,key)를 건너뛰고 오류 기록(무한 재시도 방지).
+  - `VlmErrorAnalyzer`(sense=detection): VLM verdict/confidence 를 근거로 복구 결정.
+  - `PolicyErrorAnalyzer`(sense=mock): VLM 판정이 없어 규칙 기반.
+  - env: `REMOTECTL_RECONCILE_MAX_ATTEMPTS`(기본 2) · `REMOTECTL_RECONCILE_CONF_THRESHOLD`(기본 0.5).
 - **목표 커버리지 자동 반복** — `autolearn.AutoLearner`. 목표 도달 / K라운드 무진전 / 최대 라운드로
   종료하고, **미커버 키·상태를 리포트로 노출**한다(100% 는 미발견 상태·도달불가 키 때문에 보장되지
   않으므로 `target_coverage` 를 받는다 — silent 미달 방지).

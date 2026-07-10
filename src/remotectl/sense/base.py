@@ -62,11 +62,15 @@ class SenseResult:
     - state: 판정된 ScreenState(id 는 signature 파생으로 이미 채워짐).
     - raw_signature: 정규화 전 원시 서명(추적/디버깅용; Observation.sensed_signature 원장).
     - low_confidence: confidence 가 임계 미만이라 재관찰 권고인지(엔진 힌트).
+    - verdict: LLM(VLM) 백엔드의 정상/이상 판정("normal"|"anomaly"|"no_baseline"|None).
+      detection-mcp 가 화면을 이상(anomaly)으로 판정하면 학습기가 이를 "오류 인식" 신호로
+      삼아 자가치유(재판정)를 트리거한다. mock 등 판정을 안 주는 백엔드는 None.
     """
 
     state: ScreenState
     raw_signature: str
     low_confidence: bool = False
+    verdict: Optional[str] = None
 
 
 class ScreenSense(abc.ABC):
@@ -99,11 +103,13 @@ class ScreenSense(abc.ABC):
         app_id: Optional[str],
         confidence: float,
         screenshot_ref: Optional[str],
+        verdict: Optional[str] = None,
     ) -> SenseResult:
         """정규화 → ScreenState 조립 → 저신뢰 판단을 한 곳에서.
 
         구현체는 백엔드 결과를 이 시그니처에 맞춰 넘기기만 하면, 정규화/ id 파생/
-        임계값 처리가 일관되게 적용된다(구현체 간 편차 방지).
+        임계값 처리가 일관되게 적용된다(구현체 간 편차 방지). verdict 는 LLM 정상/이상
+        판정을 그대로 실어 보내, 학습기가 오류 인식 신호로 쓴다.
         """
         norm = normalize_signature(raw_signature)
         state = ScreenState(
@@ -119,4 +125,5 @@ class ScreenSense(abc.ABC):
             state=state,
             raw_signature=raw_signature,
             low_confidence=confidence < self.confidence_threshold,
+            verdict=verdict,
         )
