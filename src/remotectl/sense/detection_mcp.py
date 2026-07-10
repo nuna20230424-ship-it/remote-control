@@ -200,6 +200,7 @@ class DetectionMcpScreenSense(ScreenSense):
             app_id=app_id,
             confidence=confidence,
             screenshot_ref=raw.image_ref,
+            verdict=self._normalize_verdict(data.get("verdict")),
         )
 
     def close(self) -> None:
@@ -272,6 +273,17 @@ class DetectionMcpScreenSense(ScreenSense):
             # 키워드 미매칭 → 원문 앞부분으로 최소 구분(정규화는 _build_result 가 수행).
             tokens.append("desc=" + " ".join(description.split())[:80])
         return "|".join(tokens)
+
+    @staticmethod
+    def _normalize_verdict(value) -> Optional[str]:
+        """LLM verdict 를 normal|anomaly|no_baseline 로 정규화(그 외/누락은 None).
+
+        이 값이 학습기의 "LLM 오류 인식" 신호가 된다(anomaly → 자가치유 트리거).
+        """
+        if not isinstance(value, str):
+            return None
+        v = value.strip().lower()
+        return v if v in ("normal", "anomaly", "no_baseline") else None
 
     @staticmethod
     def _coerce_confidence(value) -> float:

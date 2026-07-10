@@ -399,7 +399,8 @@ class Learner:
             if issue is None:
                 break
             decision = self._heal(
-                issue, current, key, f"{issue.value}", soft_attempt, result.state.confidence
+                issue, current, key, f"{issue.value}", soft_attempt, result.state.confidence,
+                extra={"verdict": result.verdict, "description": result.state.label},
             )
             if decision != Remediation.REOBSERVE:
                 break  # 소프트 이슈는 포기해도 현재 읽기를 채택.
@@ -411,14 +412,31 @@ class Learner:
                 candidate = self._capture_and_observe()
             except ScreenSenseError:
                 break  # 재판정 실패 → 현재 읽기 유지.
-            # 더 신뢰도 높은 읽기면 채택.
-            if candidate.state.confidence >= result.state.confidence:
+            # 정상 판정이 이상(anomaly) 판정을 이긴다(LLM 오류→정상 복구). 같으면 신뢰도.
+            if self._prefer(candidate, result):
                 result = candidate
 
         return result, reconciled, None
 
-    def _heal(self, phase, current, key, message, attempt, confidence=None):
-        """오류 분석기에 결정을 묻고, 관찰자에 오류+결정을 기록한 뒤 행동을 돌려준다."""
+    @staticmethod
+    def _is_anomaly(result) -> bool:
+        """LLM(VLM)이 이상으로 판정했는지."""
+        return getattr(result, "verdict", None) == "anomaly"
+
+    def _prefer(self, candidate, current) -> bool:
+        """재판정 결과 candidate 를 현재보다 채택할지: 정상>이상, 같으면 신뢰도."""
+        if self._is_anomaly(current) and not self._is_anomaly(candidate):
+            return True
+        if self._is_anomaly(candidate) and not self._is_anomaly(current):
+            return False
+        return candidate.state.confidence >= current.state.confidence
+
+    def _heal(self, phase, current, key, message, attempt, confidence=None, extra=None):
+        """오류 분석기에 결정을 묻고, 관찰자에 오류+결정을 기록한 뒤 행동을 돌려준다.
+
+        extra(verdict/description 등)를 함께 실어, LLM 판정 기반 분석기(VlmErrorAnalyzer)가
+        VLM 의 이상 판정을 근거로 복구를 결정할 수 있게 한다.
+        """
         ctx = ErrorContext(
             phase=phase,
             from_state_id=current.id,
@@ -426,13 +444,20 @@ class Learner:
             message=message,
             attempt=attempt,
             confidence=confidence,
+            extra=extra or {},
         )
         decision = self.analyzer.analyze(ctx)
         self.observer.on_error(ctx, decision)
         return decision.action
 
     def _soft_issue(self, current: ScreenState, key: KeyPress, result):
-        """현재 읽기의 소프트 이슈(저신뢰/비결정 전이)를 판별. 없으면 None."""
+        """현재 읽기의 소프트 이슈를 판별. 없으면 None.
+
+        우선순위: LLM 이상 판정(anomaly) > 저신뢰 > 비결정 전이. anomaly 는 "LLM 이 오류라
+        인식"한 신호로, 재판정(자가치유)을 유발한다.
+        """
+        if self._is_anomaly(result):
+            return ErrorPhase.LLM_ANOMALY
         if result.low_confidence:
             return ErrorPhase.LOW_CONFIDENCE
         # 과거 기록과 다른 도착 상태면 비결정(flaky) — 재판정으로 확정 시도.

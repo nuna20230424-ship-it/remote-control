@@ -55,6 +55,7 @@ class ErrorPhase(str, Enum):
     OBSERVE = "observe"      # 화면 판정 실패/미확정
     LOW_CONFIDENCE = "low_confidence"  # 판정은 됐으나 신뢰도 미달
     INCONSISTENT = "inconsistent"      # 같은 (from,key)가 관측마다 다른 to (비결정)
+    LLM_ANOMALY = "llm_anomaly"        # LLM(VLM)이 화면을 이상(anomaly)으로 판정
 
 
 @dataclass(slots=True)
