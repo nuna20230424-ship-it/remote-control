@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>STB 리모컨 학습 에이전트 (remotectl) — 진행 현황</title>
+<style>
+  :root {
+    --ink: #1a2230; --muted: #55627a; --faint: #8792a6;
+    --line: #e3e8f0; --bg: #ffffff; --panel: #f6f8fb;
+    --accent: #b26a00; --accent-bg: #fff4e0;
+    --data: #0b6b78; --data-bg: #e6f4f6;
+    --good: #1f7a44; --bad: #b03a34;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); line-height: 1.65; font-size: 15px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 22px; }
+  h2 {
+    font-size: 1.3rem; margin: 38px 0 14px; padding-bottom: 8px;
+    border-bottom: 2px solid var(--line);
+  }
+  h2 .n { color: var(--accent); font-family: var(--mono); font-size: 0.9rem; margin-right: 8px; }
+  h3 { font-size: 1.02rem; margin: 20px 0 6px; }
+  p { margin: 8px 0; }
+  code {
+    font-family: var(--mono); font-size: 0.86em; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 4px; padding: 0.5px 5px;
+  }
+  pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; font-family: var(--mono); font-size: 0.82rem;
+    line-height: 1.6; margin: 10px 0;
+  }
+  pre code { background: none; border: none; padding: 0; }
+  ul { margin: 8px 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 0.9rem; }
+  th, td { border: 1px solid var(--line); padding: 8px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--panel); font-weight: 600; }
+  .meta { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 4px 16px; margin: 0 0 8px; }
+  .badge { display: inline-block; font-family: var(--mono); font-size: 0.76rem; padding: 3px 9px; border-radius: 999px; margin: 2px 4px 2px 0; }
+  .b-good { color: var(--good); background: #eaf6ef; border: 1px solid #bfe3cc; }
+  .b-data { color: var(--data); background: var(--data-bg); border: 1px solid #b9dde1; }
+  .b-warn { color: var(--accent); background: var(--accent-bg); border: 1px solid #f0d6a8; }
+  .callout {
+    border-left: 4px solid var(--accent); background: var(--accent-bg);
+    padding: 10px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; color: #6b4a12;
+  }
+  .callout b { color: #4d360d; }
+  .tag { font-family: var(--mono); font-size: 0.72rem; color: var(--data); }
+  footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--faint); font-size: 0.82rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>STB 리모컨 학습 에이전트 <span class="tag">remotectl</span></h1>
+  <p class="sub">진행 현황 — 기획 · 설계 · 구현 · 운영 (팀 공유용)</p>
+
+  <div style="margin-bottom:8px;">
+    <span class="badge b-good">pytest 81 passed</span>
+    <span class="badge b-good">ruff clean</span>
+    <span class="badge b-data">Python 3.12 · FastAPI · SQLite</span>
+    <span class="badge b-data">PR #1–#5 머지</span>
+    <span class="badge b-warn">실기기 검증 대기</span>
+  </div>
+
+  <table>
+    <tr><th>제품</th><td>셋탑박스를 리모컨으로 조작하며 버튼→화면 전이를 학습 → 네비게이션 맵 구축 → 목표기반 에이전트가 버튼 시퀀스를 스스로 계획·실행</td></tr>
+    <tr><th>저장소</th><td><code>nuna20230424-ship-it/remote-control</code> (독립) · 패키지 <code>remotectl</code></td></tr>
+    <tr><th>상태</th><td>Mock 백엔드로 전 파이프라인 E2E 완결 · 실 STB 어댑터 배선 완료(사내망 검증 대기)</td></tr>
+  </table>
+
+  <h2><span class="n">§1</span>기획</h2>
+  <p><b>목표</b>: 사업자·단말에 종속되지 않고, STB UI를 스스로 탐색·학습해 자연어 목표를 달성하는 리모컨 제어 에이전트.</p>
+  <h3>핵심 유스케이스</h3>
+  <ul>
+    <li><b>UC-1 학습</b>: 리모컨 키를 눌러가며 화면 전이를 관찰, 네비게이션 맵을 구축.</li>
+    <li><b>UC-2 맵 조회</b>: 학습된 상태/전이/커버리지를 조회.</li>
+    <li><b>UC-3 목표 실행</b>: "넷플릭스 켜줘" 같은 목표 → 최단 버튼 경로 계획·실행, 어긋나면 재계획.</li>
+  </ul>
+  <p><b>스코프</b>: (In) mock 만으로 전 구간 완결 · 실 STB 교체식 어댑터 · REST/CLI/MCP. (Out, 후속) IR 코드 캡처(ir-mcp <code>/learn</code> 영역) · 사업자별 화면 라벨 온톨로지.</p>
+
+  <h2><span class="n">§2</span>설계</h2>
+  <p><b>파이프라인</b>: 학습(Learner) → 맵(NavGraph) → 에이전트(Planner+Executor).</p>
+  <p><b>교체 가능한 어댑터</b> (코어 엔진 변경 0줄):</p>
+  <ul>
+    <li><code>RemoteDriver</code> — <code>MockRemoteDriver</code>(개발) / <code>RemoteMcpClient</code>(실: ir-mcp + capture-mcp)</li>
+    <li><code>ScreenSense</code> — <code>MockScreenSense</code>(개발) / <code>DetectionMcpScreenSense</code>(실: detection-mcp/VLM)</li>
+  </ul>
+  <h3>실 STB 스택 = 3 서비스</h3>
+  <table>
+    <tr><th>서비스</th><th>엔드포인트</th><th>remotectl 처리</th></tr>
+    <tr><td><code>ir-mcp</code> :8002</td><td><code>POST /send {codeset, key}</code></td><td>키맵(DPAD_*/VOLUME_*/숫자/앱), repeat→N회, reset→HOME 폴백, <code>/codesets</code>→실 키집합</td></tr>
+    <tr><td><code>capture-mcp</code> :8001</td><td><code>POST /capture</code> → MP4</td><td>ffmpeg로 마지막 프레임 PNG 추출</td></tr>
+    <tr><td><code>detection-mcp</code> :8103</td><td><code>POST /check/screen</code> → verdict+description</td><td>QA 판정기 → description(VLM 서술)을 로컬 합성해 상태 식별</td></tr>
+  </table>
+  <p><b>영속화</b>: 네비게이션 맵 = JSON(networkx) · 키이벤트↔화면 매핑 = <b>별도 SQLite DB</b>(navmap과 분리).</p>
+
+  <h2><span class="n">§3</span>구현 현황</h2>
+  <table>
+    <tr><th>PR</th><th>내용</th></tr>
+    <tr><td>초기</td><td>6단계 전문가 파이프라인으로 맨바닥 빌드(기획→설계→디자인→구현→검증→배포)</td></tr>
+    <tr><td>#1</td><td>MCP 서버 — 다른 AI 에이전트가 도구로 호출</td></tr>
+    <tr><td>#2</td><td>실 STB 스택(ir-mcp/capture-mcp/detection-mcp) 배선</td></tr>
+    <tr><td>#3</td><td>커버리지 키집합을 <b>실 리모컨 키 전체</b>로 재정렬 + 미커버 리포트</td></tr>
+    <tr><td>#4</td><td><b>키↔화면 동시 학습 + 별도 DB + 오류 자가치유 + 목표 커버리지 자동 반복</b></td></tr>
+    <tr><td>#5</td><td>구현 기능 개요 페이지(<code>docs/features.html</code>)</td></tr>
+  </table>
+  <h3>추가 기능(#4)</h3>
+  <ul>
+    <li><b>동시 학습</b>: 스텝마다 (from,key)→to 매핑과 화면 LLM 분석을 함께 별도 DB에 기록.</li>
+    <li><b>오류 자가치유</b>: 전송 실패→재전송, 판정 실패/저신뢰/비결정 전이→detection-mcp VLM 재판정으로 재매핑, 소진 시 건너뜀.</li>
+    <li><b>자동 반복</b>: 목표 커버리지 도달/무진전/상한 종료 + 미커버 키·상태 리포트.</li>
+  </ul>
+  <div class="callout">
+    <b>커버리지의 정의</b> — "발견된 각 화면에서 각 <b>실 리모컨 키</b>의 효과(전이)를 관측한 비율". IR 코드 캡처가 아니다.
+    <b>100%는 미발견 상태·도달불가 키 때문에 항상 보장되지 않으므로</b> 목표 커버리지를 파라미터로 받고 미달(미커버 키/상태)을 숨기지 않는다.
+  </div>
+
+  <h2><span class="n">§4</span>운영</h2>
+  <table>
+    <tr><th>인터페이스</th><th>학습</th><th>목표 실행</th><th>자동 반복</th><th>DB/맵 조회</th></tr>
+    <tr><td>REST(:8099)</td><td><code>POST /learn</code></td><td><code>POST /goal</code></td><td><code>POST /autolearn</code></td><td><code>/map</code> · <code>/keyscreen</code></td></tr>
+    <tr><td>CLI</td><td><code>remotectl learn</code></td><td><code>remotectl goal "…"</code></td><td><code>remotectl autolearn</code></td><td><code>inspect</code> · <code>keyscreen</code></td></tr>
+    <tr><td>MCP(stdio)</td><td><code>remote_learn</code></td><td><code>remote_run_goal</code></td><td><code>remote_autolearn</code></td><td><code>remote_inspect_map</code> · <code>remote_keyscreen</code></td></tr>
+  </table>
+  <h3>즉시 실행 (mock, 실 하드웨어 불필요)</h3>
+  <pre><code>pip install -e ".[dev]"        # 또는 배포 wheel(§6) 오프라인 설치
+remotectl serve                # http://127.0.0.1:8099 대시보드
+remotectl autolearn --target 0.9</code></pre>
+  <h3>실 STB 배선 (env 스위치, 코드 변경 0)</h3>
+  <pre><code>REMOTECTL_DRIVER_BACKEND=mcp        # mock | mcp
+REMOTECTL_SENSE_BACKEND=detection   # mock | detection
+IR_MCP_URL=http://172.16.3.x:8002
+REMOTECTL_IR_CODESET=ref_remote     # 대상 단말 코드셋
+CAPTURE_MCP_URL=http://172.16.3.x:8001
+DETECTION_MCP_URL=http://172.16.3.136:8103</code></pre>
+  <p><b>배포</b>: Dockerfile · docker-compose.yml(사내망 env) · scripts · GitHub Actions CI(ruff+pytest).</p>
+
+  <h2><span class="n">§5</span>리스크 / 로드맵</h2>
+  <ol>
+    <li><b>detection 서명 안정성 튜닝</b> — 화면 서명이 흔들리면 그래프 파편화로 커버리지가 무의미. 서버측 vision 프롬프트/키워드가 최대 레버.</li>
+    <li><b>실 STB 스모크</b> — 코드셋 실측 매칭(<code>GET /codesets</code>), capture 공유 볼륨 + ffmpeg. (사내망 실기기 필요)</li>
+    <li><b>커버리지 완전성</b> — 100%는 "발견 상태 기준". 상태 분류 전용 baseline 마련 시 description 합성 → 그 경로로 승격.</li>
+  </ol>
+
+  <h2><span class="n">§6</span>배포물 (git 없이 사용)</h2>
+  <p>git 접근 없이도 <b>배포된 wheel 파일만으로</b> 설치·실행 가능. 상세는 <code>docs/DISTRIBUTION.md</code>.</p>
+  <pre><code>pip install remotectl-0.1.0-py3-none-any.whl   # 배포 파일만으로 설치
+remotectl serve                                 # mock 으로 즉시 실행</code></pre>
+  <ul>
+    <li>대시보드 정적 자산이 wheel 에 포함 → 별도 파일 없이 대시보드가 뜬다.</li>
+    <li>mock 기본이라 사내망/실 STB 없이 학습→맵→목표실행→자동반복 전 구간 동작.</li>
+    <li>재생성: <code>bash scripts/build_dist.sh</code> → <code>dist/*.whl</code> 을 팀에 전달.</li>
+  </ul>
+
+  <footer>
+    nuna20230424-ship-it/remote-control · 이 문서는 팀 공유용 진행 현황입니다. (Confluence import: Insert → Markup → HTML, 또는 CONFLUENCE.md 붙여넣기)
+  </footer>
+</div>
+</body>
+</html>
