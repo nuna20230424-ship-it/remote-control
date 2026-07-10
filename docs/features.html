@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>remotectl — 리모컨 학습 에이전트 구현 기능</title>
+<style>
+  :root {
+    --ground: #0e151f;
+    --surface: #15202e;
+    --surface-2: #1b2939;
+    --ink: #e9eef4;
+    --muted: #93a3b8;
+    --faint: #5f7189;
+    --line: rgba(255, 255, 255, 0.08);
+    --line-strong: rgba(255, 255, 255, 0.14);
+    --signal: #f2a63c;
+    --signal-dim: rgba(242, 166, 60, 0.14);
+    --data: #5bb8c4;
+    --data-dim: rgba(91, 184, 196, 0.14);
+    --good: #6cc17f;
+    --warn: #e0a63a;
+    --crit: #e0685f;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1100px 620px at 82% -8%, rgba(242, 166, 60, 0.10), transparent 60%),
+      radial-gradient(900px 560px at 8% 4%, rgba(91, 184, 196, 0.07), transparent 55%),
+      var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 0 24px; }
+  .mono { font-family: var(--mono); }
+  .eyebrow {
+    font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.22em;
+    text-transform: uppercase; color: var(--signal);
+  }
+  header { padding: 72px 0 26px; }
+  h1 {
+    font-size: clamp(2.3rem, 6vw, 3.5rem); line-height: 1.04; letter-spacing: -0.02em;
+    margin: 14px 0 6px; text-wrap: balance; font-weight: 800;
+  }
+  h1 .pkg {
+    display: block; font-family: var(--mono); font-size: 0.9rem; font-weight: 500;
+    letter-spacing: 0.04em; color: var(--muted); margin-top: 12px;
+  }
+  .lede { max-width: 60ch; color: var(--muted); font-size: 1.08rem; margin: 18px 0 26px; }
+  .lede b { color: var(--ink); font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    font-family: var(--mono); font-size: 0.74rem; padding: 5px 11px;
+    border: 1px solid var(--line-strong); border-radius: 999px; color: var(--muted);
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  .chip.ok { color: var(--good); border-color: rgba(108, 193, 127, 0.4); }
+  .chip.ok::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--good); box-shadow: 0 0 8px var(--good);
+  }
+  .hero {
+    margin: 34px 0 10px; border: 1px solid var(--line); border-radius: 16px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent); overflow: hidden;
+  }
+  .hero-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line);
+  }
+  .hero-head .t { font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.08em; color: var(--muted); }
+  .hero-head .t b { color: var(--data); }
+  canvas { display: block; width: 100%; height: 260px; }
+  .hero-cap { padding: 12px 20px 16px; font-size: 0.82rem; color: var(--faint); font-family: var(--mono); }
+  .pipe {
+    display: grid; grid-template-columns: 1fr auto 1fr auto 1fr;
+    align-items: stretch; gap: 10px; margin: 30px 0 8px;
+  }
+  .stage { border: 1px solid var(--line); border-radius: 12px; padding: 16px 16px 18px; background: var(--surface); }
+  .stage .n { font-family: var(--mono); font-size: 0.7rem; color: var(--signal); letter-spacing: 0.16em; }
+  .stage h3 { margin: 8px 0 4px; font-size: 1.05rem; }
+  .stage p { margin: 0; font-size: 0.85rem; color: var(--muted); }
+  .stage .cls { font-family: var(--mono); font-size: 0.72rem; color: var(--data); margin-top: 10px; }
+  .arrow { display: flex; align-items: center; justify-content: center; color: var(--signal); font-size: 1.3rem; font-family: var(--mono); }
+  @media (max-width: 720px) { .pipe { grid-template-columns: 1fr; } .arrow { transform: rotate(90deg); height: 22px; } }
+  section { padding: 40px 0 8px; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; }
+  .sec-head h2 { font-size: 1.45rem; margin: 0; letter-spacing: -0.01em; font-weight: 700; text-wrap: balance; }
+  .sec-head .idx { font-family: var(--mono); font-size: 0.78rem; color: var(--faint); }
+  .sec-head .rule { flex: 1; height: 1px; background: var(--line); align-self: center; }
+  .grid { display: grid; gap: 14px; }
+  .cols-2 { grid-template-columns: 1fr 1fr; }
+  .cols-3 { grid-template-columns: repeat(3, 1fr); }
+  .cols-4 { grid-template-columns: repeat(4, 1fr); }
+  @media (max-width: 720px) { .cols-2, .cols-3, .cols-4 { grid-template-columns: 1fr; } }
+  .card { border: 1px solid var(--line); border-radius: 13px; padding: 20px; background: var(--surface); display: flex; flex-direction: column; gap: 9px; }
+  .card h3 { margin: 0; font-size: 1.02rem; display: flex; align-items: center; gap: 9px; }
+  .card h3 .tag {
+    font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ground); background: var(--data); padding: 2px 7px; border-radius: 5px; font-weight: 700;
+  }
+  .card h3 .tag.sig { background: var(--signal); }
+  .card p { margin: 0; font-size: 0.88rem; color: var(--muted); }
+  .card .path { font-family: var(--mono); font-size: 0.74rem; color: var(--faint); }
+  ul.tight { margin: 4px 0 0; padding-left: 18px; font-size: 0.86rem; color: var(--muted); }
+  ul.tight li { margin: 3px 0; }
+  ul.tight code, p code, td code { font-family: var(--mono); font-size: 0.82em; color: var(--data); background: var(--data-dim); padding: 1px 5px; border-radius: 4px; }
+  pre {
+    margin: 4px 0 0; background: var(--ground); border: 1px solid var(--line); border-radius: 9px;
+    padding: 13px 14px; overflow-x: auto; font-family: var(--mono); font-size: 0.78rem; line-height: 1.7; color: #cdd8e6;
+  }
+  pre .c { color: var(--faint); }
+  pre .k { color: var(--signal); }
+  pre .s { color: var(--data); }
+  .dual { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 4px; }
+  @media (max-width: 560px) { .dual { grid-template-columns: 1fr; } }
+  .slot { border: 1px solid var(--line); border-radius: 9px; padding: 12px 13px; background: var(--surface-2); }
+  .slot .lbl { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase; }
+  .slot.mock .lbl { color: var(--faint); }
+  .slot.real .lbl { color: var(--good); }
+  .slot .cn { font-family: var(--mono); font-size: 0.8rem; color: var(--ink); margin-top: 5px; }
+  .slot .d { font-size: 0.78rem; color: var(--muted); margin-top: 5px; }
+  .tw { overflow-x: auto; border: 1px solid var(--line); border-radius: 11px; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; min-width: 560px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td .svc { font-family: var(--mono); color: var(--signal); font-weight: 600; }
+  td code { font-family: var(--mono); }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 560px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  .stat { border: 1px solid var(--line); border-radius: 11px; padding: 16px; background: var(--surface); }
+  .stat .v { font-size: 1.7rem; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .stat .v.good { color: var(--good); }
+  .stat .l { font-family: var(--mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); margin-top: 3px; }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .pill { font-family: var(--mono); font-size: 0.72rem; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--line-strong); }
+  .pill.s-ok { color: var(--good); border-color: rgba(108,193,127,0.35); background: rgba(108,193,127,0.08); }
+  .pill.s-bad { color: var(--crit); border-color: rgba(224,104,95,0.3); background: rgba(224,104,95,0.07); }
+  .git { display: flex; flex-direction: column; gap: 0; }
+  .commit { display: grid; grid-template-columns: auto 1fr; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); align-items: baseline; }
+  .commit:last-child { border-bottom: none; }
+  .commit .sha { font-family: var(--mono); font-size: 0.76rem; color: var(--signal); }
+  .commit .msg { font-size: 0.88rem; }
+  .commit .msg small { color: var(--faint); font-family: var(--mono); }
+  .note { border-left: 2px solid var(--signal); padding: 4px 0 4px 14px; margin-top: 14px; color: var(--muted); font-size: 0.85rem; }
+  footer { padding: 40px 0 70px; color: var(--faint); font-size: 0.82rem; border-top: 1px solid var(--line); margin-top: 44px; }
+  footer b { color: var(--muted); }
+  a { color: var(--data); }
+  :focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">STB · IR REMOTE · LEARNING AGENT</div>
+    <h1>
+      리모컨 학습 에이전트
+      <span class="pkg">remotectl · v0.1.0 · Python 3.12</span>
+    </h1>
+    <p class="lede">
+      셋탑박스를 리모컨으로 조작하며 <b>버튼 입력→화면 전이를 학습</b>하고, 이를
+      <b>네비게이션 맵(상태 그래프)</b>으로 구축해, 그 위에서 자연어 목표를 받아
+      <b>눌러야 할 버튼 시퀀스를 스스로 계획·실행</b>하는 목표기반 에이전트.
+    </p>
+    <div class="chips">
+      <span class="chip ok">pytest 81 passed</span>
+      <span class="chip ok">ruff clean</span>
+      <span class="chip">FastAPI · Pydantic v2 · networkx · SQLite</span>
+      <span class="chip">Mock 만으로 E2E 완결</span>
+    </div>
+  </header>
+
+  <div class="hero">
+    <div class="hero-head">
+      <span class="t">학습된 <b>네비게이션 맵</b> — 노드=화면 상태, 엣지=리모컨 버튼</span>
+      <span class="t mono">NavGraph</span>
+    </div>
+    <canvas id="graph" width="960" height="260" aria-label="네비게이션 맵: 홈에서 넷플릭스/유튜브/설정으로 전이하는 상태 그래프"></canvas>
+    <div class="hero-cap">목표 "넷플릭스 켜줘" → 최단경로 계획: HOME → RIGHT → OK</div>
+  </div>
+
+  <div class="pipe">
+    <div class="stage">
+      <div class="n">01 · LEARN</div>
+      <h3>학습</h3>
+      <p>버튼을 눌러 화면 전이를 관찰·기록하며 커버리지 목표까지 탐색한다.</p>
+      <div class="cls">Learner</div>
+    </div>
+    <div class="arrow" aria-hidden="true">→</div>
+    <div class="stage">
+      <div class="n">02 · MAP</div>
+      <h3>맵</h3>
+      <p>관찰을 상태 그래프로 누적한다. 같은 화면은 같은 노드로 수렴.</p>
+      <div class="cls">NavGraph · networkx</div>
+    </div>
+    <div class="arrow" aria-hidden="true">→</div>
+    <div class="stage">
+      <div class="n">03 · ACT</div>
+      <h3>에이전트</h3>
+      <p>목표→맵 최단경로→버튼 시퀀스 실행. 어긋나면 재계획.</p>
+      <div class="cls">Planner · Executor</div>
+    </div>
+  </div>
+
+  <section>
+    <div class="sec-head"><span class="idx">§1</span><h2>핵심 파이프라인</h2><span class="rule"></span></div>
+    <div class="grid cols-3">
+      <div class="card">
+        <h3>Learner</h3>
+        <div class="path">engine/learner.py</div>
+        <p>드라이버로 버튼을 누르고 센스로 화면을 판정해 관측을 남긴다. 미탐색 엣지를 따라가며 커버리지 목표에 도달하면 조기 종료.</p>
+        <ul class="tight">
+          <li>산출: <code>LearningSummary</code> (방문 상태·발견 전이·커버리지·미커버 키)</li>
+          <li>스텝마다 키↔화면을 별도 DB에 동시 기록 · 오류 자가치유(§4)</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>NavGraph</h3>
+        <div class="path">navmap.py</div>
+        <p>화면=노드, 버튼 전이=엣지인 networkx 방향그래프. 상태 id는 화면 서명의 해시 파생 — 같은 화면은 결정적으로 같은 노드.</p>
+        <ul class="tight">
+          <li>JSON 왕복 저장/로드 무손실</li>
+          <li>홉수 + confidence 타이브레이크 최단경로 · <code>coverage_report()</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Planner · Executor</h3>
+        <div class="path">engine/planner.py · executor.py</div>
+        <p>목표를 맵 상의 목적 상태로 해석하고 최단 버튼 경로를 계획, 실행 중 예상과 다른 화면이면 재계획한다.</p>
+        <div class="pills">
+          <span class="pill s-ok">success</span>
+          <span class="pill s-bad">failed_unreachable</span>
+          <span class="pill s-bad">failed_unresolved</span>
+          <span class="pill s-bad">failed_budget</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="idx">§2</span><h2>교체 가능한 어댑터</h2><span class="rule"></span></div>
+    <p class="lede" style="margin:0 0 16px; font-size:0.95rem;">
+      코어 엔진은 <code>RemoteDriver</code>·<code>ScreenSense</code> 추상만 안다. 개발은 mock으로
+      실 하드웨어 없이 전 구간 완결, 실연동은 어댑터만 교체 — 엔진 변경 0줄.
+    </p>
+    <div class="grid cols-2">
+      <div class="card">
+        <h3><span class="tag sig">제어</span> RemoteDriver</h3>
+        <p>리모컨 키 입력 · 화면 캡처 · 시작점 복귀 · 실 키집합 보고를 추상화.</p>
+        <div class="dual">
+          <div class="slot mock"><div class="lbl">MOCK</div><div class="cn">MockRemoteDriver</div><div class="d">가짜 STB 상태머신. 결정적 전이로 학습/테스트 완결.</div></div>
+          <div class="slot real"><div class="lbl">REAL · WIRED</div><div class="cn">RemoteMcpClient</div><div class="d">ir-mcp <code>/send</code> + capture-mcp <code>/capture</code>→ffmpeg 프레임 · <code>available_keys()</code>.</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3><span class="tag">판정</span> ScreenSense</h3>
+        <p>캡처 화면 → 상태(서명·kind·app_id·신뢰도) 판정.</p>
+        <div class="dual">
+          <div class="slot mock"><div class="lbl">MOCK</div><div class="cn">MockScreenSense</div><div class="d">결정적 판정. 같은 화면→같은 state id 보장.</div></div>
+          <div class="slot real"><div class="lbl">REAL · WIRED</div><div class="cn">DetectionMcpScreenSense</div><div class="d">detection-mcp <code>/check/screen</code>의 description을 로컬 합성.</div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="idx">§3</span><h2>호출 인터페이스</h2><span class="rule"></span></div>
+    <div class="grid cols-3">
+      <div class="card">
+        <h3><span class="tag sig">REST</span> FastAPI</h3>
+        <p>대시보드 + REST. 기본 포트 <code>:8099</code>.</p>
+        <pre><span class="c"># 엔드포인트</span>
+GET  /health
+POST /learn
+GET  /map · /map/path
+POST /goal
+POST /autolearn
+GET  /keyscreen
+GET  /          <span class="c"># 대시보드</span></pre>
+      </div>
+      <div class="card">
+        <h3><span class="tag sig">CLI</span> remotectl</h3>
+        <p>단발 실행/조회/자동학습.</p>
+        <pre><span class="k">remotectl</span> learn
+<span class="k">remotectl</span> goal <span class="s">"넷플릭스 켜줘"</span>
+<span class="k">remotectl</span> autolearn <span class="s">--target 0.95</span>
+<span class="k">remotectl</span> keyscreen
+<span class="k">remotectl</span> serve</pre>
+      </div>
+      <div class="card">
+        <h3><span class="tag">MCP</span> 도구</h3>
+        <p>다른 AI 에이전트가 도구로 호출(stdio).</p>
+        <pre>remote_learn
+remote_inspect_map
+remote_find_path
+remote_run_goal
+remote_autolearn
+remote_keyscreen</pre>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="idx">§4</span><h2>동시 학습 · 별도 DB · 자가치유 · 자동 반복</h2><span class="rule"></span></div>
+    <p class="lede" style="margin:0 0 16px; font-size:0.95rem;">
+      리모컨 키와 화면을 <b>한 패스에서 동시에</b> 학습하고 LLM(VLM) 분석과 함께 <b>별도 DB</b>에 쌓으며,
+      오류는 자가치유하고, <b>목표 커버리지까지 자동 반복</b>한다. 코어 경계(M5) 유지 — 엔진은 추상 훅만 안다.
+    </p>
+    <div class="grid cols-4">
+      <div class="card">
+        <h3>동시 학습</h3>
+        <div class="path">engine/hooks.py</div>
+        <p>스텝마다 <code>(from,key)→to</code> 매핑 + 화면 LLM 분석을 함께 기록(StepObserver 훅).</p>
+      </div>
+      <div class="card">
+        <h3>별도 DB</h3>
+        <div class="path">store.py · SQLite</div>
+        <p><code>screens</code>·<code>key_screen_map</code>·<code>error_log</code>. navmap(JSON)과 분리. <code>REMOTECTL_KEYSCREEN_DB</code>.</p>
+      </div>
+      <div class="card">
+        <h3>오류 자가치유</h3>
+        <div class="path">reconcile.py</div>
+        <p>전송실패→재전송, 판정실패/저신뢰/비결정→<b>VLM 재판정(REOBSERVE)</b> 재매핑, 소진→건너뜀.</p>
+      </div>
+      <div class="card">
+        <h3>자동 반복</h3>
+        <div class="path">autolearn.py</div>
+        <p>목표 커버리지 도달 / 무진전 / 상한 종료. <b>미커버 키·상태 리포트</b>.</p>
+      </div>
+    </div>
+    <div class="note">
+      100% 는 미발견 상태·도달불가 키 때문에 항상 보장되지 않는다 → <code>target_coverage</code> 를 받고
+      <code>uncovered_key_tokens</code>/<code>uncovered_states</code> 를 리포트로 노출한다(silent 미달 방지).
+      커버리지 분모는 <b>실 리모컨 키 전체</b>(드라이버 <code>available_keys()</code>, POWER 등 안전 제외)이며,
+      "발견된 상태 기준"임을 문서에 명시한다.
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="idx">§5</span><h2>실 STB 배선 — 3 서비스</h2><span class="rule"></span></div>
+    <p class="lede" style="margin:0 0 16px; font-size:0.95rem;">
+      사내 스택 실물 계약에 맞춰 배선. 제어·캡처·판정이 세 서비스로 분리되며, 두 곳은 단순 경로가 아닌 의미 변환을 어댑터가 흡수한다.
+    </p>
+    <div class="tw">
+      <table>
+        <thead><tr><th>서비스</th><th>엔드포인트</th><th>배선 처리</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="svc">ir-mcp</span><br /><small class="mono" style="color:var(--faint)">:8002</small></td>
+            <td><code>POST /send {codeset, key}</code></td>
+            <td>키맵 DPAD_*/VOLUME_*/숫자/앱대문자 · repeat→N회 · reset→HOME 폴백 · <code>/codesets</code>→키집합</td>
+          </tr>
+          <tr>
+            <td><span class="svc">capture-mcp</span><br /><small class="mono" style="color:var(--faint)">:8001</small></td>
+            <td><code>POST /capture</code> → MP4</td>
+            <td>영상만 제공 → ffmpeg로 마지막 프레임 PNG 추출해 스틸로 사용</td>
+          </tr>
+          <tr>
+            <td><span class="svc">detection-mcp</span><br /><small class="mono" style="color:var(--faint)">:8103</small></td>
+            <td><code>POST /check/screen</code> → verdict + description</td>
+            <td>QA 판정기이므로 description(VLM 서술)을 키워드/의미토큰으로 로컬 합성 → 상태 식별</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><span class="idx">§6</span><h2>검증 · 배포</h2><span class="rule"></span></div>
+    <div class="stats">
+      <div class="stat"><div class="v good">81</div><div class="l">pytest passed</div></div>
+      <div class="stat"><div class="v">16</div><div class="l">모듈 · tier 0–3</div></div>
+      <div class="stat"><div class="v good">0</div><div class="l">ruff 경고</div></div>
+      <div class="stat"><div class="v">3</div><div class="l">호출 인터페이스</div></div>
+    </div>
+    <div class="grid cols-2" style="margin-top:14px;">
+      <div class="card">
+        <h3>검증 하네스</h3>
+        <ul class="tight">
+          <li>Mock 기반 E2E: 학습→맵→경로탐색→실행/재계획, 자동반복→DB 기록→자가치유</li>
+          <li>계약 테스트: httpx MockTransport로 실 MCP 계약 검증</li>
+          <li>커버리지 키집합(실 키)·상태 서명 안정성·맵 JSON 왕복·SQLite 원장</li>
+          <li>GitHub Actions CI (ruff + pytest, py3.12)</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>배포</h3>
+        <ul class="tight">
+          <li><code>Dockerfile</code> · <code>docker-compose.yml</code> (사내망 env)</li>
+          <li><code>scripts/run_dev.sh</code> · <code>run_learning.sh</code></li>
+          <li>기획/설계/디자인 산출물 <code>docs/</code>에 동봉</li>
+        </ul>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px;">
+      <h3>main 히스토리</h3>
+      <div class="git">
+        <div class="commit"><span class="sha">fbd8ec8</span><span class="msg">키↔화면 동시학습 + 별도 DB + 자가치유 + 자동반복 <small>#4</small></span></div>
+        <div class="commit"><span class="sha">cd53e05</span><span class="msg">커버리지 키집합을 실 리모컨 키 전체로 재정렬 <small>#3</small></span></div>
+        <div class="commit"><span class="sha">e224667</span><span class="msg">실 STB 스택(ir-mcp/capture-mcp/detection-mcp) 배선 <small>#2</small></span></div>
+        <div class="commit"><span class="sha">a126344</span><span class="msg">다른 AI 에이전트가 도구로 호출하는 MCP 서버 <small>#1</small></span></div>
+        <div class="commit"><span class="sha">7f74c31</span><span class="msg">초기 빌드 — 6단계 전문가 파이프라인</span></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <b>현재 상태:</b> Mock 백엔드로 학습→맵→에이전트→자동반복 전 구간 완결. 실 STB 연동(ir-mcp/capture-mcp/detection-mcp)은 배선 완료 — 남은 확인은 코드셋 실측 매칭 · capture 공유볼륨/ffmpeg 배치 · detection 서명 안정성 튜닝(사내망 실기기 대상)이며, 이 전제가 충족돼야 실기기 커버리지 수치가 신뢰된다.<br />
+    <span class="mono" style="color:var(--faint)">nuna20230424-ship-it/remote-control · 이 페이지는 구현 기능 개요입니다.</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var canvas = document.getElementById("graph");
+  if (!canvas || !canvas.getContext) return;
+  var ctx = canvas.getContext("2d");
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var nodes = {
+    home:     { x: 0.10, y: 0.50, label: "HOME", kind: "home" },
+    l_nf:     { x: 0.36, y: 0.22, label: "런처·NF", kind: "menu" },
+    l_yt:     { x: 0.36, y: 0.50, label: "런처·YT", kind: "menu" },
+    l_set:    { x: 0.36, y: 0.78, label: "런처·설정", kind: "menu" },
+    netflix:  { x: 0.68, y: 0.20, label: "넷플릭스", kind: "app" },
+    youtube:  { x: 0.68, y: 0.50, label: "유튜브", kind: "app" },
+    settings: { x: 0.68, y: 0.80, label: "설정", kind: "settings" }
+  };
+  var edges = [
+    { a: "home", b: "l_nf", key: "RIGHT" },
+    { a: "home", b: "l_yt", key: "RIGHT×2" },
+    { a: "home", b: "l_set", key: "RIGHT×3" },
+    { a: "l_nf", b: "netflix", key: "OK" },
+    { a: "l_yt", b: "youtube", key: "OK" },
+    { a: "l_set", b: "settings", key: "OK" }
+  ];
+  var path = ["home", "l_nf", "netflix"];
+  var C = {
+    home: "#f2a63c", app: "#5bb8c4", menu: "#93a3b8", settings: "#93a3b8",
+    line: "rgba(255,255,255,0.12)", pathline: "#f2a63c", ink: "#e9eef4", faint: "#5f7189"
+  };
+  var W = 0, H = 0, dpr = 1;
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = canvas.clientWidth; H = canvas.clientHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  function P(n) { return { x: nodes[n].x * W, y: nodes[n].y * H }; }
+  function onPath(a, b) {
+    for (var i = 0; i < path.length - 1; i++) { if (path[i] === a && path[i + 1] === b) return true; }
+    return false;
+  }
+  function draw(t) {
+    ctx.clearRect(0, 0, W, H);
+    edges.forEach(function (e) {
+      var pa = P(e.a), pb = P(e.b), hot = onPath(e.a, e.b);
+      ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y);
+      ctx.strokeStyle = hot ? C.pathline : C.line; ctx.lineWidth = hot ? 2 : 1;
+      ctx.globalAlpha = hot ? 0.9 : 1; ctx.stroke(); ctx.globalAlpha = 1;
+      var mx = (pa.x + pb.x) / 2, my = (pa.y + pb.y) / 2;
+      ctx.font = "10px ui-monospace, Menlo, monospace";
+      ctx.fillStyle = hot ? C.pathline : C.faint; ctx.textAlign = "center";
+      ctx.fillText(e.key, mx, my - 5);
+    });
+    if (!reduce) {
+      var segs = path.length - 1, prog = (t / 2600) % 1;
+      var seg = Math.floor(prog * segs), local = (prog * segs) - seg;
+      var pa = P(path[seg]), pb = P(path[seg + 1]);
+      var px = pa.x + (pb.x - pa.x) * local, py = pa.y + (pb.y - pa.y) * local;
+      ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.fillStyle = C.pathline; ctx.shadowColor = C.pathline; ctx.shadowBlur = 12; ctx.fill(); ctx.shadowBlur = 0;
+    }
+    Object.keys(nodes).forEach(function (k) {
+      var n = nodes[k], p = P(k), r = (n.kind === "home" || n.kind === "app") ? 8 : 6;
+      ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = C[n.kind] || C.menu;
+      if (n.kind === "home" || n.kind === "app") { ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 8; }
+      ctx.fill(); ctx.shadowBlur = 0;
+      ctx.font = "11px system-ui, sans-serif"; ctx.fillStyle = C.ink;
+      ctx.textAlign = p.x > W * 0.55 ? "left" : (p.x < W * 0.2 ? "left" : "center");
+      var tx = p.x > W * 0.55 ? p.x + 12 : (p.x < W * 0.2 ? p.x + 12 : p.x);
+      var ty = n.kind === "home" ? p.y + 4 : p.y + r + 14;
+      if (p.x > W * 0.55) ty = p.y + 4;
+      ctx.fillText(n.label, tx, ty);
+    });
+  }
+  var raf;
+  function loop(t) { draw(t || 0); raf = requestAnimationFrame(loop); }
+  function start() { resize(); if (raf) cancelAnimationFrame(raf); if (reduce) draw(0); else loop(0); }
+  window.addEventListener("resize", function () { resize(); if (reduce) draw(0); });
+  start();
+})();
+</script>
+</body>
+</html>
