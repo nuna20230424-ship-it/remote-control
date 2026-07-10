@@ -82,6 +82,10 @@ DEFAULT_BUTTON_SET: list[KeyPress] = [
     KeyPress(button=Button.MENU),
 ]
 
+# 드라이버가 보고한 실 리모컨 키를 자동 채택할 때 탐색에서 제외할 위험/무의미 키.
+# POWER 는 탐색 중 단말을 꺼버릴 수 있어 기본 제외한다(명시 button_set 으로는 포함 가능).
+UNSAFE_BUTTONS: frozenset = frozenset({Button.POWER})
+
 
 class Learner:
     """UC-1 탐색 학습 엔진.
@@ -110,10 +114,26 @@ class Learner:
         self.driver = driver
         self.sense = sense
         self.graph = graph
-        # None 또는 빈 리스트면 기본 집합. 리스트는 방어적으로 복사한다.
-        self.button_set: list[KeyPress] = (
-            list(button_set) if button_set else list(DEFAULT_BUTTON_SET)
-        )
+        # 커버리지 키 집합(=탐색 대상) 결정. 우선순위:
+        #   1) 명시 button_set(호출자 지정)
+        #   2) 드라이버가 보고한 실 리모컨 키(available_keys) — 안전 제외키(POWER 등) 제거
+        #   3) 기본 탐색셋(DEFAULT_BUTTON_SET) 폴백
+        # 이로써 커버리지 분모가 "고정 7키"가 아니라 실제 단말 리모컨 키 집합이 된다.
+        self.key_set_source: str
+        if button_set:
+            self.button_set = list(button_set)
+            self.key_set_source = "explicit"
+        else:
+            reported = [
+                kp for kp in self.driver.available_keys()
+                if kp.button not in UNSAFE_BUTTONS
+            ]
+            if reported:
+                self.button_set = reported
+                self.key_set_source = "driver"
+            else:
+                self.button_set = list(DEFAULT_BUTTON_SET)
+                self.key_set_source = "default"
         self.settle_ms = max(0, int(settle_ms))
 
     # --------------------------------------------------------------------- #
@@ -304,10 +324,21 @@ class Learner:
     ) -> LearningSummary:
         """세션 종료 집계를 조립한다."""
         navmap = self.graph.navmap
+        key_coverage: dict[str, float] = {}
+        uncovered_tokens: list[str] = []
         try:
             coverage_ratio: Optional[float] = self._clamp01(self._coverage())
         except Exception:  # noqa: BLE001 — 집계 실패가 요약 자체를 깨지 않게.
             coverage_ratio = None
+        try:
+            report = self.graph.coverage_report(self.button_set)
+            key_coverage = {tok: pk["ratio"] for tok, pk in report["per_key"].items()}
+            # 모든 발견 상태에서 시도되지 않은(비율<1.0) 키 = 100% 미달 신호.
+            uncovered_tokens = sorted(
+                tok for tok, ratio in key_coverage.items() if ratio < 1.0
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
         return LearningSummary(
             session_id=session_id,
@@ -316,6 +347,9 @@ class Learner:
             transitions_recorded=len(navmap.transitions),
             unexplored_edges=self._count_unexplored_edges(),
             coverage_ratio=coverage_ratio,
+            key_set_source=self.key_set_source,
+            key_coverage=key_coverage,
+            uncovered_key_tokens=uncovered_tokens,
             started_at=started_at,
             finished_at=_utcnow(),
             stop_reason=stop_reason,

@@ -487,6 +487,16 @@ class LearningSummary(_StrictModel):
     coverage_ratio: Optional[Confidence] = Field(
         default=None, description="도달가능 상태 대비 방문 비율(계산 가능 시)."
     )
+    key_set_source: Optional[str] = Field(
+        default=None, description="커버리지 키 집합 출처('driver'=실 리모컨 키 | 'default'=기본 탐색셋)."
+    )
+    key_coverage: dict[str, float] = Field(
+        default_factory=dict, description="키(token)별 커버리지 비율(발견 상태 대비 시도 비율)."
+    )
+    uncovered_key_tokens: list[str] = Field(
+        default_factory=list,
+        description="아직 모든 발견 상태에서 시도되지 않은 키 토큰(100% 미달 신호).",
+    )
     started_at: datetime = Field(default_factory=_utcnow)
     finished_at: Optional[datetime] = None
     stop_reason: Optional[str] = Field(default=None, max_length=200)
